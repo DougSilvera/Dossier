@@ -1,0 +1,34 @@
+{
+  "workspaceRoot": "~/workspace",
+  "personalRules": "~/.dossier/personal.md",
+  "sharedSkills": [],
+  "firm": {
+    "key": "firm",
+    "name": "Your Firm",
+    "hubRoot": "~/workspace/hub",
+    "sandboxRoot": "~/workspace/sandbox",
+    "expectEmail": "you@yourfirm.example",
+    "expectOrg": "<your firm org uuid>"
+  },
+  "clients": [
+    {
+      "key": "acme",
+      "name": "Acme Health",
+      "root": "~/workspace/clients/acme",
+      "seat": "enterprise",
+      "expectEmail": "you@acme.example.com",
+      "expectOrg": "<acme org uuid>",
+      "formerRoots": ["~/workspace/acme-old-checkout"],
+      "contacts": ["Product: Jane Doe"],
+      "status": "active"
+    },
+    {
+      "key": "widgetco",
+      "name": "WidgetCo",
+      "root": "~/workspace/clients/widgetco",
+      "seat": "none",
+      "expectEmail": "you@yourfirm.example",
+      "status": "active"
+    }
+  ]
+}

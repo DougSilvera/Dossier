@@ -1,0 +1,4 @@
+# Local state that belongs to one machine, never the repo
+.dossier.json
+dossier.managed.json
+*.bak
