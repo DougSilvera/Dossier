@@ -2,9 +2,11 @@
   <img src="assets/logo.svg" alt="Dossier: one sealed Claude Code home per client" width="600">
 </p>
 
-One Claude Code config home per client engagement, picked by folder. Each client's instructions, memory, skills and MCP servers stay in its own home, and an enterprise-seat client's files can't be read from any other home. Windows, PowerShell 7.
+One Claude Code config home per client engagement, picked by folder. Each client's instructions, memory, skills and MCP servers stay in its own home, and other homes are kept out of an enterprise-seat client's files. Windows, PowerShell 7.
 
 Why it works this way: [DESIGN.md](DESIGN.md).
+
+That separation stops accidents and honest mistakes, not a determined session or another program on the machine. On native Windows, Claude Code's sandbox doesn't run, so shell commands are checked by reading their text. Read [what this does not stop](DESIGN.md#what-this-does-not-stop) before you promise a client anything on the strength of it.
 
 ## Daily use
 
