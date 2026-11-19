@@ -1,6 +1,6 @@
 # Dossier
 
-Status: in use since 2026-11. 101 tests in `windows/tests/Test-Kit.ps1`.
+Status: in use since 2026-11. 164 tests in `windows/tests/Test-Kit.ps1`.
 
 ## Problem
 
@@ -23,7 +23,22 @@ Every client gets its own home, whatever account it bills. Isolation comes from 
 | `~/.claude-homes/<client>` (seat: enterprise) | The client's org seat | That client only |
 | `~/.claude-homes/<client>` (seat: none) | The firm | That client only |
 
+Templates (below) have no home of their own: they run in the firm home.
+
 `~/.claude` is the firm home because Claude Code keeps the default home's state file at `~/.claude.json`, outside the directory, and the launcher can't treat it as just another home.
+
+## Templates
+
+A template is a firm-owned base repo that client repos are built from: team conventions, patterns, scaffolding. Its default is the opposite of a client's. It is fully shared with the hub, and its content flows one way, toward clients.
+
+- **Registry:** a `templates` list beside `clients`, each with `key`, `name`, `root`, `repos`, `enterpriseRead` (default false) and `status`. A client lists the templates it is built from in `basedOn`.
+- **Home:** the firm home. Template roots are firm roots, so `cc` in one starts the firm home, its memory sits next to the hub's, and the hub reads its code through `additionalDirectories`. `cc -a <template> --at-root` starts the firm home in the template's root. Each template still gets its own memory, because memory is filed per folder.
+- **Folder:** `~/workspace/templates/<key>/`, a sibling of the hub and `clients/`. Inside the hub, the hub's `CLAUDE.md` would load into every template session, and client homes deny the hub.
+- **Instructions:** the template root's `CLAUDE.md` (Sync writes a stub) holds working notes about the template. Conventions that should ship to every client copy go in the repo's own `CLAUDE.md`.
+- **Client access:** every client home denies every template. A client may read a template only when it lists it in `basedOn`, and an enterprise-seat client only when the template also sets `enterpriseRead: true`, because its sessions run under the client's org terms. A client that may read a template gets it in `additionalDirectories` and an `Edit` deny on it. No client ever edits a template.
+- **Promoting from clients:** manual. The hub, template and client `CLAUDE.md` stubs say to report a client pattern worth promoting as a candidate to the user, and to move nothing from a client toward a template unless the user says so in that turn. Client homes can't edit templates, so for them the deny rules enforce it. In the firm home it's an instruction only.
+
+`Import-Dossier -Key <key> -Apply` brings a client or template onto the machine: Sync, clone each listed repo that isn't there yet, then the doctor. It refuses an enterprise-seat client from inside a Claude session.
 
 ## Data rule
 
@@ -45,6 +60,9 @@ Enforcement, strongest first:
 
 - **Shell reads the shell guard can't see.** It reads the command text, so a path built at run time, a script that opens files on its own (`os.walk('.')` from a parent folder), or a link into a denied folder gets past it. It's a tripwire for honest mistakes. OS-level enforcement is Claude Code's sandbox, which applies `Read` deny rules to every shell command, but the sandbox runs only on macOS, Linux and WSL2. On native Windows `sandbox.enabled` is ignored and commands run unsandboxed, and `sandbox.failIfUnavailable` would stop Claude Code from starting at all, so Sync sets neither.
 - **A determined session.** The session checks in 2 rely on `CLAUDECODE`; a session that unsets it, or runs `claude.exe` with its own `CLAUDE_CONFIG_DIR`, gets past them. They stop accidents and honest mistakes, not an adversary on the machine.
+- **Clients' lessons reaching a template through the firm home.** The hub may edit templates and may read no-seat clients' code, so nothing but its instructions stops it copying one into the other. It must report candidates and wait for the user's word.
+- **Writes the shell guard can't recognize.** For a template a client may read, the shell guard blocks commands that look like writes (common write cmdlets and commands, `>` redirects, `sed -i`, git commands that change files or history) and name it or run from inside it. Anything else that writes gets past it.
+- **Shell guard false positives on prose.** It reads the whole command text, so a heredoc or script that merely contains a word like `find` or `tree` can trip the recursive-search check. Write long text with the file tools instead.
 - **Deny rules through links.** `cc` and the guard resolve links; whether Claude Code's own deny-rule matching does is untested. Open client work by its real path.
 
 ## Folder layout
@@ -56,6 +74,9 @@ Enforcement, strongest first:
   clients/
     <client>/             client root; CLAUDE.md = client-wide rules, never committed to client repos
       <repo>/ ...
+  templates/
+    <template>/           template root; firm home; CLAUDE.md = working notes, not committed
+      <repo>/
   sandbox/                personal experiments; firm home
 ```
 
@@ -87,10 +108,11 @@ Settings and `.mcp.json` are not inherited from parent folders, so client-wide M
 | `Dossier.ps1` | Dot-source from `$PROFILE`: defines `cc`, `cc-<key>`, and a `claude` that goes through the launcher (opt out with `DOSSIER_NO_CLAUDE_SHIM=1`). Git Bash: `source dossier.bash`. |
 | `Invoke-Dossier.ps1` | The launcher. Picks the home that owns the folder, applies the refusals above, clears only the variables a session hands its children, never copies between homes. |
 | `Sync-Dossier.ps1` | Makes the machine match the registry: roots, homes, deny rules, `additionalDirectories`, guard hooks, personal `CLAUDE.md`, shared skills, hub table, client stubs. Dry run unless `-Apply`. Only removes rules it added (tracked in `<home>\dossier.managed.json`); never overwrites a `CLAUDE.md` it didn't write. Every file it rewrites keeps a timestamped `.bak`. |
-| `Test-Dossier.ps1` | Read-only doctor: logins, cross-home links, ancestor `CLAUDE.md`, deny rules, guard hooks, one entry's memory in another's home (including `formerRoots`), unregistered folders, leftover kit wiring. |
+| `Test-Dossier.ps1` | Read-only doctor: logins, cross-home links, ancestor `CLAUDE.md`, deny rules, guard hooks, one entry's or template's memory in another home (including `formerRoots`), unregistered folders, templates blocked for an enterprise client, repos not cloned yet, leftover kit wiring. |
+| `Import-Dossier.ps1` | Clones a registered client's or template's `repos` into its root after a Sync, then runs the doctor. Dry run unless `-Apply`. Never touches an existing folder. |
 | `dossier-guard.ps1` | SessionStart hook. Silent when everything matches. |
-| `dossier-shellguard.ps1` | PreToolUse hook for Bash and PowerShell. Denies commands that reach a path the home's deny rules cover; silent otherwise. |
-| `tests/Test-Kit.ps1` | 125 checks against a throwaway `USERPROFILE` and a stub `claude`. |
+| `dossier-shellguard.ps1` | PreToolUse hook for Bash and PowerShell. Denies commands that reach a path the home's `Read` deny rules cover, and writes to a path it may only read; silent otherwise. |
+| `tests/Test-Kit.ps1` | 164 checks against a throwaway `USERPROFILE` and a stub `claude`. |
 
 Setting up a home: `Sync-Dossier -Apply`, then `cc -a <key>` and `/login` as the expected account, then `Test-Dossier`.
 
@@ -115,6 +137,7 @@ From setting this up on the first machine:
 - **Don't move or write client content from a Claude session.** It's the wrong account for that data, and a session's file tools are denied inside an enterprise root anyway. Run moves from your own terminal.
 - **After any failed move, check both sides** at the level that could have moved: file counts, `.git` internals, `git rev-parse`. "The folder still exists" proves nothing.
 - **`pwsh -File` doesn't expand `~`, and it splits `--opt=C:\x` at the drive colon** (it reads `-name:value`). Use full paths in commands you hand to someone; the launcher rejoins the split.
+- **`git clone` from a local path hard-links object files**, so cleanup that deletes "links" as if they were folders breaks on them.
 - **Org-synced skills live in `skills/synced/<org-uuid>_*`** in the home that was logged in to that org. A home that changes accounts keeps the old org's bucket until you move it.
 
 ## Open questions

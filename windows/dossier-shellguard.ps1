@@ -10,6 +10,8 @@
 #     WSL form, through ~, $HOME, $env:USERPROFILE or %USERPROFILE%
 #   - has a wildcard whose fixed part is a folder holding a denied path
 #   - searches or copies recursively from a folder holding a denied path
+# A path with an Edit rule and no Read rule (a template a client may read) only stops commands
+# that look like writes and name it, or run from inside it.
 # Its own failures let the command through, with a note.
 
 $ErrorActionPreference = 'Stop'
@@ -21,9 +23,9 @@ function Out-Deny([string] $Reason) {
     exit 0
 }
 
-function ConvertFrom-RulePath([string] $Rule) {
+function ConvertFrom-RulePath([string] $Rule, [string] $Kind) {
     # Read(//c/x/y/**) -> C:\x\y ; Read(~/x) -> <home>\x ; anything else (project-relative, inner wildcards) -> $null
-    $m = [regex]::Match($Rule, '^\s*(Read|Edit)\((.*)\)\s*$')
+    $m = [regex]::Match($Rule, '^\s*(' + $Kind + ')\((.*)\)\s*$')
     if (-not $m.Success) { return $null }
     $p = $m.Groups[2].Value -replace '/\*\*?$', ''
     if ($p -match '[*?\[]') { return $null }
@@ -43,8 +45,10 @@ try {
     if (-not (Test-Path -LiteralPath $settingsFile)) { exit 0 }
     $s = [IO.File]::ReadAllText($settingsFile) | ConvertFrom-Json
     $rules = @(); if ($s -and $s.permissions -and $s.permissions.deny) { $rules = @($s.permissions.deny) }
-    $denied = @($rules | ForEach-Object { ConvertFrom-RulePath ([string]$_) } | Where-Object { $_ } | Select-Object -Unique)
-    if (-not $denied.Count) { exit 0 }
+    $denied = @($rules | ForEach-Object { ConvertFrom-RulePath ([string]$_) 'Read' } | Where-Object { $_ } | Select-Object -Unique)
+    $editOnly = @($rules | ForEach-Object { ConvertFrom-RulePath ([string]$_) 'Edit' } | Where-Object { $_ } | Select-Object -Unique |
+        Where-Object { $p = $_; -not @($denied | Where-Object { Test-DsrUnder $p $_ }).Count })
+    if (-not $denied.Count -and -not $editOnly.Count) { exit 0 }
 
     $userHome = Get-DsrUserHome
     $text = $command
@@ -64,6 +68,20 @@ try {
     }
 
     if (Test-Path -LiteralPath $cwd) { Set-Location -LiteralPath $cwd }
+
+    # Edit-only paths (a template a client may read) stop commands that look like writes.
+    $writes = '(?i)(^|[\s;|&(])((Set-Content|Add-Content|Out-File|New-Item|Remove-Item|Move-Item|Copy-Item|Rename-Item|Clear-Content|ni|rm|rmdir|del|mv|cp|mkdir|touch|tee|truncate|ln|patch|git\s+(-C\s+\S+\s+)?(add|commit|push|pull|merge|rebase|reset|checkout|switch|restore|clean|apply|am|stash|cherry-pick|revert|rm|mv|init|clone))(?=\s|$)|sed\s+[^;|&]*-i)|(?<![0-9])>(?!&)'
+    if ($editOnly.Count -and $text -match $writes) {
+        $here = Resolve-DsrPath $cwd
+        foreach ($d in $editOnly) { if (Test-DsrUnder $here $d) { Out-Deny "dossier-shellguard: this home may read $d but not change it, and this command looks like a write from inside it. Tell the user; changes to it go through its owner's home." } }
+        foreach ($t in ($text -split '[\s"''`;|&()<>,=]+')) {
+            if (-not $t -or $t.StartsWith('-') -or $t -match '^[A-Za-z][A-Za-z0-9+.-]+:') { continue }
+            try { $p = Resolve-DsrPath ($t -replace '[*?\[].*$', '') } catch { continue }
+            if (-not $p) { continue }
+            foreach ($d in $editOnly) { if (Test-DsrUnder $p $d) { Out-Deny "dossier-shellguard: this home may read $d but not change it, and this command looks like a write to '$t'. Tell the user; changes to it go through its owner's home." } }
+        }
+    }
+
     $existing = 0; $holders = @()
     foreach ($t in ($text -split '[\s"''`;|&()<>,=]+')) {
         if (-not $t -or $t.StartsWith('-') -or $t -match '^[A-Za-z][A-Za-z0-9+.-]+:') { continue }

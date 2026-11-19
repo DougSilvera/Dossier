@@ -3,11 +3,13 @@
 #   pwsh -File Test-Dossier.ps1
 #
 # FAIL  a home logged in to the wrong account; a home that links into another home; a CLAUDE.md
-#       above a client root (it would load into every session there); missing deny rules or
-#       guard hooks; an enterprise root readable from the firm home; one entry's memory or transcripts
-#       stored in another entry's home.
-# WARN  a home not logged in yet; folders under the workspace in no registered root; leftover
-#       claude-multi-account-kit wiring.
+#       above a client or template root (it would load into every session there); missing deny
+#       rules (including a client that could edit a template) or guard hooks; an enterprise root
+#       readable from the firm home; one entry's or template's memory or transcripts stored in
+#       another home.
+# WARN  a home not logged in yet; folders under the workspace in no registered root; an
+#       enterprise client based on a template that doesn't allow enterprise reads; registered
+#       repos not cloned yet; leftover claude-multi-account-kit wiring.
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\Dossier.Common.ps1"
@@ -61,25 +63,43 @@ foreach ($e in $reg.Entries) {
     if (Test-Path -LiteralPath $proj) {
         # Slugs lose the separators, so a folder belongs to the entry with the longest matching
         # slug: acme-labs' folders also start with acme's slug.
-        $slugs = @(foreach ($o in $reg.Entries) { foreach ($r in @($o.Roots) + @($o.FormerRoots)) { [pscustomobject]@{ Key = $o.Key; Slug = (Get-DsrProjectSlug $r) } } }) |
-            Sort-Object { $_.Slug.Length } -Descending
+        $tplRoots = @($reg.Templates | ForEach-Object Root)
+        $slugs = @(
+            foreach ($o in $reg.Entries) { foreach ($r in @($o.Roots) + @($o.FormerRoots)) { if ($r -notin $tplRoots) { [pscustomobject]@{ Key = $o.Key; Home = $o.Home; Slug = (Get-DsrProjectSlug $r) } } } }
+            foreach ($t in $reg.Templates) { [pscustomobject]@{ Key = "template $($t.Key)"; Home = (Get-DsrDefaultHome); Slug = (Get-DsrProjectSlug $t.Root) } }
+        ) | Sort-Object { $_.Slug.Length } -Descending
         $wrong = @{}
         foreach ($d in @(Get-ChildItem -LiteralPath $proj -Directory -Force | ForEach-Object Name)) {
             $hit = $slugs | Where-Object { $d -ieq $_.Slug -or $d.StartsWith("$($_.Slug)-", [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
-            if ($hit -and $hit.Key -ne $e.Key) { $wrong[$hit.Key] = 1 + [int]$wrong[$hit.Key] }
+            if ($hit -and $hit.Home -ne $e.Home) { $wrong[$hit.Key] = 1 + [int]$wrong[$hit.Key] }
         }
         foreach ($k in $wrong.Keys) { Report 'FAIL' "$tag holds $($wrong[$k]) project folder(s) for '$k': its memory or transcripts are in the wrong home" }
     }
 }
 
-foreach ($c in @($reg.Entries | Where-Object Kind -eq 'client')) {
-    $p = Split-Path $c.Roots[0] -Parent
+$aboveChecks = @($reg.Entries | Where-Object Kind -eq 'client' | ForEach-Object { @{ Tag = $_.Key; Root = $_.Roots[0]; What = 'client' } }) +
+    @($reg.Templates | ForEach-Object { @{ Tag = "template $($_.Key)"; Root = $_.Root; What = 'template' } })
+foreach ($c in $aboveChecks) {
+    $p = Split-Path $c.Root -Parent
     while ($p) {
-        if (Test-Path -LiteralPath (Join-Path $p 'CLAUDE.md')) { Report 'FAIL' "[$($c.Key)] $p\CLAUDE.md is above the client root and loads into every session there" }
+        if (Test-Path -LiteralPath (Join-Path $p 'CLAUDE.md')) { Report 'FAIL' "[$($c.Tag)] $p\CLAUDE.md is above the $($c.What) root and loads into every session there" }
         $parent = Split-Path $p -Parent
         if (-not $parent -or $parent -eq $p) { break }
         $p = $parent
     }
+}
+
+foreach ($t in $reg.Templates) {
+    foreach ($c in @($reg.Entries | Where-Object { $t.Key -cin $_.BasedOn -and -not (Test-DsrTemplateReadable $_ $t) })) {
+        Report 'WARN' "[$($c.Key)] is based on template '$($t.Key)', but it is an enterprise seat and the template doesn't set enterpriseRead; it has no access"
+    }
+}
+
+$repoOwners = @($reg.Entries | Where-Object Kind -eq 'client' | ForEach-Object { @{ Tag = $_.Key; Root = $_.Roots[0]; Repos = $_.Repos } }) +
+    @($reg.Templates | ForEach-Object { @{ Tag = $_.Key; Root = $_.Root; Repos = $_.Repos } })
+foreach ($o in $repoOwners) {
+    $missing = @($o.Repos | Where-Object { -not (Test-Path -LiteralPath (Join-Path (Join-Path $o.Root $_.Dir) '.git')) } | ForEach-Object Dir)
+    if ($missing.Count) { Report 'WARN' "[$($o.Tag)] repos not cloned yet: $($missing -join ', ') (Import-Dossier -Key $($o.Tag) -Apply)" }
 }
 
 if (Test-Path -LiteralPath $reg.WorkspaceRoot) {

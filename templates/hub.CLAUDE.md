@@ -10,6 +10,10 @@ No-seat clients can be handed work with `cc -a <key> --at-root -p "<task>"`.
 
 No-seat clients: their code may be read through `additionalDirectories`. Their `CLAUDE.md` rules don't apply to hub sessions.
 
+## Templates
+
+Templates are firm-owned base repos that client repos are built from. Hub sessions may read and edit them. Nothing from a client's code, memory or tickets goes into a template unless the user says so in that turn. When a client pattern looks worth promoting, describe it to the user as a candidate (which client, which template, what, why) and stop.
+
 ## Engagements
 
 <!-- BEGIN GENERATED: Sync-Dossier -->

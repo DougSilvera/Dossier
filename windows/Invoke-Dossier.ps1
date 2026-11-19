@@ -3,6 +3,7 @@
 #   cc                         # the home that owns this folder (the firm's outside every client root)
 #   cc -a acme                 # or --account: that entry's home, from any folder it may run in
 #   cc -a widgetco --at-root -p "status of ABC-123?"   # cd to the entry's root first
+#   cc -a base-template --at-root   # a template key: the firm home, in that template's root
 #   cc --dossier-override      # start an enterprise home despite a login or provider mismatch
 # Every other argument goes to claude unchanged. Messages go to stderr.
 # Registry: ~/.dossier.json, or $env:DOSSIER_CONFIG. $env:CLAUDE_BIN overrides claude.
@@ -45,16 +46,17 @@ for ($i = 0; $i -lt $args.Count; $i++) {
 
 try { $reg = Read-DsrRegistry } catch { Write-DsrErr "[cc] $($_.Exception.Message)"; exit 1 }
 
-$entry = $null
+$entry = $null; $root = $null
 if ($explicit) {
     $entry = Find-DsrEntry $reg $explicit
-    if (-not $entry) { Write-DsrErr "[cc] no entry '$explicit'. Known: $(($reg.Entries | ForEach-Object Key) -join ', ')"; exit 1 }
+    if ($entry) { $root = @($entry.Roots)[0] }
+    elseif ($t = Find-DsrTemplate $reg $explicit) { $entry = Find-DsrFirm $reg; $root = $t.Root }
+    else { Write-DsrErr "[cc] no entry '$explicit'. Known: $((@($reg.Entries | ForEach-Object Key) + @($reg.Templates | ForEach-Object Key)) -join ', ')"; exit 1 }
 }
 
 $pushed = $false
 if ($atRoot) {
     if (-not $entry) { Write-DsrErr '[cc] --at-root needs -a <key>.'; exit 1 }
-    $root = @($entry.Roots)[0]
     if (-not (Test-Path -LiteralPath $root)) { Write-DsrErr "[cc] $root doesn't exist. Run Sync-Dossier.ps1 -Apply."; exit 1 }
     Push-Location -LiteralPath $root; $pushed = $true
 }

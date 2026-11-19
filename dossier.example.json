@@ -28,6 +28,18 @@
       "root": "~/workspace/clients/widgetco",
       "seat": "none",
       "expectEmail": "you@yourfirm.example",
+      "basedOn": ["base-app"],
+      "repos": [{ "remote": "git@github.com:widgetco/widget-app.git" }],
+      "status": "active"
+    }
+  ],
+  "templates": [
+    {
+      "key": "base-app",
+      "name": "Base App",
+      "root": "~/workspace/templates/base-app",
+      "enterpriseRead": false,
+      "repos": [{ "remote": "git@github.com:yourfirm/base-app.git" }],
       "status": "active"
     }
   ]
