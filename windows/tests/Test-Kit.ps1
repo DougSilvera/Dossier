@@ -129,6 +129,8 @@ try {
     Check 'firm denies every client home' ($acmeHomeRule -in $fz.permissions.deny -and $widgetHomeRule -in $fz.permissions.deny)
     Check 'firm reads no-seat client' (@($fz.permissions.additionalDirectories) -contains "$ws\clients\widgetco".Replace('\', '/'))
     Check 'firm guard hook' (($fz.hooks.SessionStart | ConvertTo-Json -Depth 8) -match 'dossier-guard')
+    $sg = @($fz.hooks.PreToolUse | Where-Object { ($_.hooks | ConvertTo-Json -Depth 4) -match 'dossier-shellguard' })
+    Check 'firm shell guard hook on Bash and PowerShell' ($sg.Count -eq 1 -and $sg[0].matcher -eq 'Bash|PowerShell')
     $ac = Read-Json "$tmp\.claude-homes\acme\settings.json"
     Check 'client denies other client and hub' ($widgetRule -in $ac.permissions.deny -and $hubRule -in $ac.permissions.deny)
     Check 'client denies other homes and the firm state file' ($widgetHomeRule -in $ac.permissions.deny -and $firmHomeRule -in $ac.permissions.deny -and $firmStateRule -in $ac.permissions.deny)
@@ -312,6 +314,45 @@ try {
     Check 'guard: a missing registry is reported' ($g.Out -match 'INDETERMINATE: no registry')
     $env:DOSSIER_CONFIG = Join-Path $tmp '.dossier.json'
 
+    # --- shell guard
+    function Shell([string] $Command, [string] $Cwd, [string] $ConfigDir) {
+        if ($ConfigDir) { $env:CLAUDE_CONFIG_DIR = $ConfigDir } elseif (Test-Path Env:\CLAUDE_CONFIG_DIR) { Remove-Item Env:\CLAUDE_CONFIG_DIR }
+        $r = Run 'dossier-shellguard.ps1' @() $tmp (@{ tool_name = 'PowerShell'; tool_input = @{ command = $Command }; cwd = $Cwd } | ConvertTo-Json)
+        if (Test-Path Env:\CLAUDE_CONFIG_DIR) { Remove-Item Env:\CLAUDE_CONFIG_DIR }
+        return $r
+    }
+    $acmeFile = "$ws\clients\acme\a"
+    $posix = $acmeFile.Substring(0, 1).ToLower() + $acmeFile.Substring(2).Replace('\', '/')
+    $shellCases = @(
+        @{ n = 'absolute path'; c = "Get-Content $acmeFile"; d = $ws; deny = $true }
+        @{ n = 'Git Bash path'; c = "cat /$posix"; d = $ws; deny = $true }
+        @{ n = 'WSL path'; c = "cat /mnt/$posix"; d = $ws; deny = $true }
+        @{ n = 'escaped path in a script'; c = "python -c `"open('$($acmeFile.Replace('\', '\\'))')`""; d = $ws; deny = $true }
+        @{ n = '$env:USERPROFILE'; c = 'gc $env:USERPROFILE\.claude-homes\acme\CLAUDE.md'; d = $ws; deny = $true }
+        @{ n = '~'; c = 'cat ~/workspace/clients/acme/a'; d = $ws; deny = $true }
+        @{ n = 'relative path'; c = 'type clients\acme\a.txt'; d = $ws; deny = $true }
+        @{ n = 'parent-relative path'; c = 'cat ../acme/a'; d = "$ws\clients\widgetco"; deny = $true }
+        @{ n = 'wildcard over a denied root'; c = 'cat ../*/a'; d = "$ws\clients\widgetco"; deny = $true }
+        @{ n = 'recursive search from above'; c = 'rg TODO'; d = $ws; deny = $true }
+        @{ n = 'recursive search naming a parent'; c = "Get-ChildItem -Recurse $ws"; d = "$ws\hub"; deny = $true }
+        @{ n = 'recursive search in an allowed folder'; c = 'rg TODO clients\widgetco'; d = $ws; deny = $false }
+        @{ n = 'ordinary command'; c = 'git status; git log -3'; d = "$ws\hub"; deny = $false }
+        @{ n = 'whole segments only'; c = "Get-Content $ws\acme-old\a"; d = $ws; deny = $false }
+        @{ n = 'URL'; c = 'curl https://example.test/clients/acme'; d = $ws; deny = $false }
+        @{ n = 'wildcard in an allowed folder'; c = 'ls *.md'; d = "$ws\hub"; deny = $false }
+    )
+    foreach ($c in $shellCases) {
+        $r = Shell $c.c $c.d ''
+        $isDenied = $r.Out -match '"permissionDecision":"deny"'
+        Check "shell guard: $($c.n) $(if ($c.deny) { 'denied' } else { 'allowed' })" ($r.Code -eq 0 -and $isDenied -eq $c.deny) "$($c.c) -> $($r.Out) $($r.Err)"
+    }
+    $r = Shell "cat $ws\hub\notes.md" "$ws\clients\acme" "$tmp\.claude-homes\acme"
+    Check 'shell guard: a client home keeps out of the hub' ($r.Out -match '"deny"') $r.Out
+    $r = Shell "cat $acmeFile" "$ws\clients\acme" "$tmp\.claude-homes\acme"
+    Check 'shell guard: a client reads its own root' ($r.Out -eq '') $r.Out
+    $r = Shell "cat $ws\anything" $ws "$tmp\no-such-home"
+    Check 'shell guard: a home without settings lets commands through' ($r.Code -eq 0 -and $r.Out -eq '') $r.Out
+
     # --- doctor
     Remove-Item "$tmp\.claude\CLAUDE.md"
     Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
@@ -329,6 +370,12 @@ try {
     $d = Run 'Test-Dossier.ps1'
     Check 'doctor finds a CLAUDE.md above a client root' ($d.Out -match 'above the client root')
     Remove-Item "$ws\CLAUDE.md"
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor: a clean workspace has no loose items' ($d.Out -notmatch 'in no registered root') $d.Out
+    New-Item -ItemType Directory -Path "$ws\clients\.claude" -Force | Out-Null
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor finds a loose item inside a folder that holds roots' ($d.Out -match 'WARN\s+1 item\(s\).*clients\\\.claude') $d.Out
+    Remove-Item "$ws\clients\.claude"
     Set-Login "$tmp\.claude-homes\acme\.claude.json" 'me@firm.test'
     $d = Run 'Test-Dossier.ps1'
     Check 'doctor finds a wrong login' ($d.Out -match 'FAIL\s+\[acme\] logged in as me@firm.test')
@@ -341,6 +388,12 @@ try {
         Check "doctor finds a missing $($case.n) deny rule" ($d.Code -eq 1 -and $d.Out -match 'missing deny rules')
         [IO.File]::WriteAllText("$tmp\.claude\settings.json", $orig)
     }
+    $s = Read-Json "$tmp\.claude\settings.json"; $orig = $s | ConvertTo-Json -Depth 32
+    $s.hooks.Remove('PreToolUse')
+    [IO.File]::WriteAllText("$tmp\.claude\settings.json", ($s | ConvertTo-Json -Depth 32))
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor finds a missing shell guard hook' ($d.Code -eq 1 -and $d.Out -match 'shell guard hook not wired')
+    [IO.File]::WriteAllText("$tmp\.claude\settings.json", $orig)
 
     # --- doctor: a key that prefixes another key (acme / acme-labs) is not a leak
     $labs = [ordered]@{ key = 'acme-labs'; root = '~/workspace/clients/acme-labs'; seat = 'none'; expectEmail = 'me@firm.test' }

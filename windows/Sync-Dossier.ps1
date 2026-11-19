@@ -5,7 +5,8 @@
 #
 # For every entry it ensures:
 #   - its roots and home exist
-#   - its home's settings.json has the dossier guard SessionStart hook, Read/Edit deny rules for
+#   - its home's settings.json has the dossier guard SessionStart hook, the shell guard PreToolUse
+#     hook for Bash and PowerShell, Read/Edit deny rules for
 #     what it must not see (Get-DsrDeniedPaths: the firm denies enterprise-seat roots and every
 #     client home; a client denies other clients' roots and homes, the hub, ~/.claude and
 #     ~/.claude.json), and for the firm, additionalDirectories for no-seat clients. Only rules this
@@ -84,11 +85,18 @@ function Sync-Settings($Entry) {
     if (-not $has) { $groups += [ordered]@{ hooks = @([ordered]@{ type = 'command'; command = $cmd }) } }
     $s.hooks.SessionStart = $groups
 
+    $cmd = Get-DsrShellGuardCommand
+    $groups = @(); if ($s.hooks.Contains('PreToolUse')) { $groups = @($s.hooks.PreToolUse | Where-Object { $null -ne $_ }) }
+    $has = $false
+    foreach ($g in $groups) { foreach ($h in @($g.hooks)) { if ([string]$h.command -like '*dossier-shellguard.ps1*') { $has = $true; $h.command = $cmd; $g.matcher = 'Bash|PowerShell' } } }
+    if (-not $has) { $groups += [ordered]@{ matcher = 'Bash|PowerShell'; hooks = @([ordered]@{ type = 'command'; command = $cmd }) } }
+    $s.hooks.PreToolUse = $groups
+
     $after = $s | ConvertTo-Json -Depth 32
     $managed = [ordered]@{ deny = $deny; additionalDirectories = $dirs } | ConvertTo-Json -Depth 4
     $managedNow = if (Test-Path -LiteralPath $managedFile) { [IO.File]::ReadAllText($managedFile) } else { '' }
     if ($after -ne $before -or $managed -ne $managedNow) {
-        $what = "update $file ($($deny.Count) deny rules, $($dirs.Count) additional dirs, guard hook)"
+        $what = "update $file ($($deny.Count) deny rules, $($dirs.Count) additional dirs, guard hooks)"
         Step $what { Write-TextFile $file $after; Write-TextFile $managedFile $managed }
     }
 }

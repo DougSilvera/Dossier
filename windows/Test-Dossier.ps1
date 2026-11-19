@@ -4,7 +4,7 @@
 #
 # FAIL  a home logged in to the wrong account; a home that links into another home; a CLAUDE.md
 #       above a client root (it would load into every session there); missing deny rules or
-#       guard hook; an enterprise root readable from the firm home; one entry's memory or transcripts
+#       guard hooks; an enterprise root readable from the firm home; one entry's memory or transcripts
 #       stored in another entry's home.
 # WARN  a home not logged in yet; folders under the workspace in no registered root; leftover
 #       claude-multi-account-kit wiring.
@@ -46,9 +46,8 @@ foreach ($e in $reg.Entries) {
     $deny = @(); if ($s -and $s.permissions -and $s.permissions.deny) { $deny = @($s.permissions.deny) }
     $missing = @(Get-DsrDenyRules $reg $e | Where-Object { $_ -notin $deny })
     if ($missing.Count) { Report 'FAIL' "$tag missing deny rules: $($missing -join ', ')" } else { Report 'ok' "$tag deny rules in place" }
-    $hooked = $false
-    if ($s -and $s.hooks -and $s.hooks.SessionStart) { foreach ($g in @($s.hooks.SessionStart)) { foreach ($h in @($g.hooks)) { if ([string]$h.command -like '*dossier-guard.ps1*') { $hooked = $true } } } }
-    if (-not $hooked) { Report 'FAIL' "$tag guard hook not wired in $settingsFile" }
+    if (-not (Test-DsrHooked $s 'SessionStart' 'dossier-guard.ps1')) { Report 'FAIL' "$tag guard hook not wired in $settingsFile" }
+    if (-not (Test-DsrHooked $s 'PreToolUse' 'dossier-shellguard.ps1')) { Report 'FAIL' "$tag shell guard hook not wired in $settingsFile" }
     if ($e.Kind -eq 'firm' -and $s -and $s.permissions -and $s.permissions.additionalDirectories) {
         foreach ($d in @($s.permissions.additionalDirectories)) {
             foreach ($c in @($reg.Entries | Where-Object Seat -eq 'enterprise')) {
@@ -85,10 +84,16 @@ foreach ($c in @($reg.Entries | Where-Object Kind -eq 'client')) {
 
 if (Test-Path -LiteralPath $reg.WorkspaceRoot) {
     $roots = @($reg.Entries | ForEach-Object { $_.Roots })
-    $loose = @(Get-ChildItem -LiteralPath $reg.WorkspaceRoot -Force | Where-Object {
-        $x = $_.FullName
-        -not @($roots | Where-Object { (Test-DsrUnder $x $_) -or (Test-DsrUnder $_ $x) }).Count
-    } | ForEach-Object Name)
+    $loose = @()
+    $scan = [Collections.Generic.Queue[string]]::new(); $scan.Enqueue($reg.WorkspaceRoot)
+    while ($scan.Count) {
+        foreach ($i in @(Get-ChildItem -LiteralPath $scan.Dequeue() -Force -ErrorAction SilentlyContinue)) {
+            $x = $i.FullName
+            if (@($roots | Where-Object { Test-DsrUnder $x $_ }).Count) { continue }
+            if ($i.PSIsContainer -and -not $i.LinkType -and @($roots | Where-Object { Test-DsrUnder $_ $x }).Count) { $scan.Enqueue($x); continue }
+            $loose += [IO.Path]::GetRelativePath($reg.WorkspaceRoot, $x)
+        }
+    }
     if ($loose.Count) { Report 'WARN' "$($loose.Count) item(s) under $($reg.WorkspaceRoot) in no registered root (run in the firm home): $(($loose | Select-Object -First 12) -join ', ')$(if ($loose.Count -gt 12) { ', ...' })" }
 }
 

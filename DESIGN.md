@@ -39,10 +39,11 @@ Enforcement, strongest first:
 3. **`cc` refuses an enterprise home on the wrong terms:** logged in to an account other than `expectEmail`/`expectOrg`, or with `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX` set in the shell or the home's settings. `--dossier-override` starts it anyway, deliberately. A home that isn't logged in yet starts, so you can `/login`.
 4. **The `dossier-guard` SessionStart hook** flags any session whose home doesn't own its folder, even when the login is the same. It covers launches that bypass `cc`.
 5. **Deny rules.** Each home's user `settings.json` gets `Read`/`Edit` deny rules for everything it must not see. The firm home denies every enterprise root and every client home. A client home denies every other client's root and home, the hub, `~/.claude` and `~/.claude.json`. Rules live at user scope, so they apply in every session of that home wherever it starts.
+6. **The `dossier-shellguard` PreToolUse hook** holds Bash and PowerShell commands to the same deny rules, read from the home's `settings.json`. Without it, deny rules cover only the file tools and the few Bash commands Claude Code recognizes (`cat`, `head`, `tail`, `sed`, `tee`). It denies a command that names a denied path (absolute, relative to the session folder, Git Bash or WSL form, through `~`, `$HOME`, `$env:USERPROFILE` or `%USERPROFILE%`), has a wildcard that can reach one, or searches recursively from a folder that holds one (`rg` in `~/workspace`). It costs about half a second per shell command.
 
 ### What this does not stop
 
-- **Shell reads.** Deny rules govern Claude's file tools. A shell command such as `cat` is only covered when Claude Code's sandbox is enabled for that home, and Sync doesn't enable it yet.
+- **Shell reads the shell guard can't see.** It reads the command text, so a path built at run time, a script that opens files on its own (`os.walk('.')` from a parent folder), or a link into a denied folder gets past it. It's a tripwire for honest mistakes. OS-level enforcement is Claude Code's sandbox, which applies `Read` deny rules to every shell command, but the sandbox runs only on macOS, Linux and WSL2. On native Windows `sandbox.enabled` is ignored and commands run unsandboxed, and `sandbox.failIfUnavailable` would stop Claude Code from starting at all, so Sync sets neither.
 - **A determined session.** The session checks in 2 rely on `CLAUDECODE`; a session that unsets it, or runs `claude.exe` with its own `CLAUDE_CONFIG_DIR`, gets past them. They stop accidents and honest mistakes, not an adversary on the machine.
 - **Deny rules through links.** `cc` and the guard resolve links; whether Claude Code's own deny-rule matching does is untested. Open client work by its real path.
 
@@ -76,7 +77,7 @@ Settings and `.mcp.json` are not inherited from parent folders, so client-wide M
 |---|---|
 | Registry schema and `dossier.example.json` | `~/.dossier.json` (the person's real registry) |
 | Templates for hub and client `CLAUDE.md` | The person's personal rules source (`~/.dossier/personal.md`) |
-| Launcher, guard hook, sync, doctor, tests | Logins (`.credentials.json`, `.claude.json`) |
+| Launcher, guard hooks, sync, doctor, tests | Logins (`.credentials.json`, `.claude.json`) |
 | | Memory, transcripts, client secrets, backups |
 
 ## Tools (`windows/`, PowerShell 7)
@@ -85,10 +86,11 @@ Settings and `.mcp.json` are not inherited from parent folders, so client-wide M
 |---|---|
 | `Dossier.ps1` | Dot-source from `$PROFILE`: defines `cc`, `cc-<key>`, and a `claude` that goes through the launcher (opt out with `DOSSIER_NO_CLAUDE_SHIM=1`). Git Bash: `source dossier.bash`. |
 | `Invoke-Dossier.ps1` | The launcher. Picks the home that owns the folder, applies the refusals above, clears only the variables a session hands its children, never copies between homes. |
-| `Sync-Dossier.ps1` | Makes the machine match the registry: roots, homes, deny rules, `additionalDirectories`, guard hook, personal `CLAUDE.md`, shared skills, hub table, client stubs. Dry run unless `-Apply`. Only removes rules it added (tracked in `<home>\dossier.managed.json`); never overwrites a `CLAUDE.md` it didn't write. Every file it rewrites keeps a timestamped `.bak`. |
-| `Test-Dossier.ps1` | Read-only doctor: logins, cross-home links, ancestor `CLAUDE.md`, deny rules, guard hook, one entry's memory in another's home (including `formerRoots`), unregistered folders, leftover kit wiring. |
+| `Sync-Dossier.ps1` | Makes the machine match the registry: roots, homes, deny rules, `additionalDirectories`, guard hooks, personal `CLAUDE.md`, shared skills, hub table, client stubs. Dry run unless `-Apply`. Only removes rules it added (tracked in `<home>\dossier.managed.json`); never overwrites a `CLAUDE.md` it didn't write. Every file it rewrites keeps a timestamped `.bak`. |
+| `Test-Dossier.ps1` | Read-only doctor: logins, cross-home links, ancestor `CLAUDE.md`, deny rules, guard hooks, one entry's memory in another's home (including `formerRoots`), unregistered folders, leftover kit wiring. |
 | `dossier-guard.ps1` | SessionStart hook. Silent when everything matches. |
-| `tests/Test-Kit.ps1` | 101 checks against a throwaway `USERPROFILE` and a stub `claude`. |
+| `dossier-shellguard.ps1` | PreToolUse hook for Bash and PowerShell. Denies commands that reach a path the home's deny rules cover; silent otherwise. |
+| `tests/Test-Kit.ps1` | 125 checks against a throwaway `USERPROFILE` and a stub `claude`. |
 
 Setting up a home: `Sync-Dossier -Apply`, then `cc -a <key>` and `/login` as the expected account, then `Test-Dossier`.
 

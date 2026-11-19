@@ -18,7 +18,7 @@ For an enterprise-seat client, `cc` refuses to start when the home is logged in 
 
 Plain `claude` is routed the same way, so typing it out of habit, or in VS Code's terminal, still lands in the right home. Set `DOSSIER_NO_CLAUDE_SHIM=1` before your profile loads to turn that off.
 
-At session start, `dossier-guard` stays silent when the home matches the folder. A CRITICAL message means relaunch with `cc`.
+At session start, `dossier-guard` stays silent when the home matches the folder. A CRITICAL message means relaunch with `cc`. During the session, `dossier-shellguard` denies shell commands that would reach a folder the home is kept out of, which deny rules alone don't cover on Windows.
 
 ## Setup
 

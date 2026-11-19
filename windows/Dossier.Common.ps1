@@ -3,6 +3,7 @@
 # wired to `powershell` by mistake.
 
 $script:DsrGuardScript = Join-Path $PSScriptRoot 'dossier-guard.ps1'
+$script:DsrShellGuardScript = Join-Path $PSScriptRoot 'dossier-shellguard.ps1'
 $script:DsrManagedMarker = '<!-- managed by dossier -->'
 
 # Variables a Claude Code session hands to its children. Everything else CLAUDE_* is the
@@ -312,3 +313,11 @@ function Get-DsrReadableRoots($Reg, $Entry) {
 }
 
 function Get-DsrGuardCommand { return 'pwsh -NoProfile -File "' + $script:DsrGuardScript.Replace('\', '/') + '"' }
+
+function Get-DsrShellGuardCommand { return 'pwsh -NoProfile -File "' + $script:DsrShellGuardScript.Replace('\', '/') + '"' }
+
+function Test-DsrHooked($Settings, [string] $Event, [string] $Script) {
+    if (-not $Settings -or -not $Settings.hooks -or -not $Settings.hooks.$Event) { return $false }
+    foreach ($g in @($Settings.hooks.$Event)) { foreach ($h in @($g.hooks)) { if ([string]$h.command -like "*$Script*") { return $true } } }
+    return $false
+}
