@@ -5,6 +5,8 @@
 $script:DsrGuardScript = Join-Path $PSScriptRoot 'dossier-guard.ps1'
 $script:DsrShellGuardScript = Join-Path $PSScriptRoot 'dossier-shellguard.ps1'
 $script:DsrManagedMarker = '<!-- managed by dossier -->'
+$script:DsrAgentMarker = '<!-- managed by dossier: role contract below. Edit the agent in your roster, then run Sync-Dossier. -->'
+$script:DsrRoles = @('lead', 'builder', 'reviewer', 'researcher', 'ops', 'hr')
 
 # Variables a Claude Code session hands to its children. Everything else CLAUDE_* is the
 # user's own configuration and must reach the child untouched.
@@ -182,6 +184,29 @@ function Read-DsrRegistry {
     $firmRoots = @($hub)
     if ($f.sandboxRoot) { $firmRoots += Resolve-DsrRegistryPath ([string]$f.sandboxRoot) 'firm.sandboxRoot' }
 
+    $agents = $null
+    if ($null -ne $raw.agents) {
+        if (-not $raw.agents.source) { throw "agents has no source (the folder holding your agent files)" }
+        $roles = [ordered]@{}
+        foreach ($prop in @(if ($raw.agents.roles) { $raw.agents.roles.PSObject.Properties })) {
+            if ($prop.Name -cnotin $script:DsrRoles) { throw "agents.roles '$($prop.Name)' is not a role; roles are $($script:DsrRoles -join ', ')" }
+            $n = [string]$prop.Value
+            if ($n -cnotmatch '^[a-z0-9][a-z0-9-]*\z') { throw "agents.roles.$($prop.Name) '$n' must be an agent name: lowercase letters, digits and -" }
+            if ($n -in @($roles.Values)) { throw "agent '$n' fills two roles; give each role its own agent" }
+            $roles[$prop.Name] = $n
+        }
+        $agents = [pscustomobject]@{ Source = (Resolve-DsrRegistryPath ([string]$raw.agents.source) 'agents.source'); Roles = $roles }
+    }
+    function Read-AgentRoles($Raw, [string] $Kind, [string] $What) {
+        if ($null -eq $Raw.PSObject.Properties['agentRoles']) { return $null }
+        $list = @(@($Raw.agentRoles) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        foreach ($r in $list) {
+            if ($r -cnotin $script:DsrRoles) { throw "$What agentRoles '$r' is not a role" }
+            if ($r -eq 'hr' -and $Kind -ne 'firm') { throw "$What agentRoles can't include hr: hr edits your roster and lives only in the firm home" }
+        }
+        return $list
+    }
+
     if ($null -ne $raw.PSObject.Properties['templates']) { throw "$path has a 'templates' section; templates are now 'products', each with its own home and a clientRead list" }
 
     $entries.Add([pscustomobject]@{
@@ -189,6 +214,7 @@ function Read-DsrRegistry {
         Home = (Get-DsrDefaultHome); Roots = $firmRoots; FormerRoots = @(); HubRoot = $hub
         ExpectEmail = [string]$f.expectEmail; ExpectOrg = [string]$f.expectOrg
         Contacts = @(); Status = 'active'; BasedOn = @(); Repos = @(); ClientRead = @(); EnterpriseRead = $false
+        AgentRoles = (Read-AgentRoles $f 'firm' 'firm')
     })
 
     foreach ($p in @($raw.products)) {
@@ -217,6 +243,7 @@ function Read-DsrRegistry {
             Contacts = @(@($p.contacts) | Where-Object { $_ }); Status = [string]($p.status ?? 'active')
             BasedOn = @(); Repos = @(Read-DsrRepos $p.repos "product '$key'")
             ClientRead = $clientRead; EnterpriseRead = [bool]$p.enterpriseRead
+            AgentRoles = (Read-AgentRoles $p 'product' "product '$key'")
         })
     }
 
@@ -243,6 +270,7 @@ function Read-DsrRegistry {
             ExpectEmail = [string]$c.expectEmail; ExpectOrg = [string]$c.expectOrg
             Contacts = @(@($c.contacts) | Where-Object { $_ }); Status = [string]($c.status ?? 'active')
             BasedOn = $basedOn; Repos = @(Read-DsrRepos $c.repos "client '$key'"); ClientRead = @(); EnterpriseRead = $false
+            AgentRoles = (Read-AgentRoles $c 'client' "client '$key'")
         })
     }
 
@@ -282,8 +310,45 @@ function Read-DsrRegistry {
         WorkspaceRoot = $workspace
         PersonalRules = if ($raw.personalRules) { Resolve-DsrRegistryPath ([string]$raw.personalRules) 'personalRules' } else { $null }
         SharedSkills  = @(@($raw.sharedSkills) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        Agents        = $agents
         Entries       = $entries.ToArray()
     }
+}
+
+function Get-DsrEntryAgents($Reg, $Entry) {
+    # The agents a home gets, as @{ Role; Name; Source }. By default the firm home gets every
+    # role the roster fills; other homes get all but lead (it replaces the main session's
+    # prompt, so it is opt-in) and hr (it edits the roster, so it stays in the firm home).
+    if (-not $Reg.Agents) { return @() }
+    $want = if ($null -ne $Entry.AgentRoles) { $Entry.AgentRoles }
+            elseif ($Entry.Kind -eq 'firm') { @($Reg.Agents.Roles.Keys) }
+            else { @($Reg.Agents.Roles.Keys | Where-Object { $_ -notin @('lead', 'hr') }) }
+    return @(foreach ($role in $script:DsrRoles) {
+        if ($role -notin $want -or -not $Reg.Agents.Roles.Contains($role)) { continue }
+        $name = $Reg.Agents.Roles[$role]
+        [pscustomobject]@{ Role = $role; Name = $name; Source = (Join-Path $Reg.Agents.Source "$name.md") }
+    })
+}
+
+function Get-DsrAgentFrontmatter([string] $Text) {
+    $m = [regex]::Match($Text, '\A﻿?---\r?\n(.*?)\r?\n---', 'Singleline')
+    $out = @{}
+    if (-not $m.Success) { return $out }
+    foreach ($line in ($m.Groups[1].Value -split '\r?\n')) {
+        $kv = [regex]::Match($line, '^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$')
+        if ($kv.Success) { $out[$kv.Groups[1].Value] = $kv.Groups[2].Value.Trim().Trim('"', "'") }
+    }
+    return $out
+}
+
+function Get-DsrInstalledAgent($Agent) {
+    # The agent file a home gets: the roster's file as written, then the role contract and the
+    # rules common to every role, after a marker so Sync knows the file is its own.
+    $roles = Join-Path (Split-Path $PSScriptRoot -Parent) 'roles'
+    $src = [IO.File]::ReadAllText($Agent.Source).TrimEnd()
+    $contract = [IO.File]::ReadAllText((Join-Path $roles "$($Agent.Role).md")).TrimEnd()
+    $common = [IO.File]::ReadAllText((Join-Path $roles '_common.md')).TrimEnd()
+    return "$src`n`n$($script:DsrAgentMarker)`n`n$contract`n`n$common`n"
 }
 
 function Find-DsrEntry($Reg, [string] $Key) {

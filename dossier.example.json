@@ -2,6 +2,10 @@
   "workspaceRoot": "~/workspace",
   "personalRules": "~/.dossier/personal.md",
   "sharedSkills": [],
+  "agents": {
+    "source": "~/.dossier/agents",
+    "roles": { "lead": "my-lead", "builder": "my-builder", "reviewer": "my-reviewer", "researcher": "my-researcher", "hr": "my-hr" }
+  },
   "firm": {
     "key": "firm",
     "name": "Your Firm",

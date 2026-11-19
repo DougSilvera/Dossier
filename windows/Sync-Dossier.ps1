@@ -95,6 +95,27 @@ function Sync-ProductStatus($Entry) {
     Step "write $file (product status)" { Write-TextFile $file $text -NoBackup }
 }
 
+function Sync-Agents($Entry) {
+    $dir = Join-Path $Entry.Home 'agents'
+    $want = @(Get-DsrEntryAgents $reg $Entry)
+    $keep = @()
+    foreach ($a in $want) {
+        if (-not (Test-Path -LiteralPath $a.Source)) { Write-Host "  warn  agent '$($a.Name)' for role $($a.Role) has no file at $($a.Source)"; continue }
+        $fm = Get-DsrAgentFrontmatter ([IO.File]::ReadAllText($a.Source))
+        if ($fm['name'] -cne $a.Name) { Write-Host "  warn  $($a.Source) says name: '$($fm['name'])', but the registry calls it '$($a.Name)'; skipped"; continue }
+        $dst = Join-Path $dir "$($a.Name).md"; $keep += $dst
+        $text = Get-DsrInstalledAgent $a
+        if (-not (Test-Path -LiteralPath $dst) -or [IO.File]::ReadAllText($dst) -ne $text) { Step "write $dst ($($a.Role))" { Write-TextFile $dst $text -NoBackup } }
+    }
+    if (Test-Path -LiteralPath $dir) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter '*.md' -File)) {
+            if ($f.FullName -notin $keep -and [IO.File]::ReadAllText($f.FullName).Contains($script:DsrAgentMarker)) {
+                Step "remove $($f.FullName) (no longer in this home's roles)" { Remove-Item -LiteralPath $f.FullName }
+            }
+        }
+    }
+}
+
 $script:SkillName = 'dossier-product'
 function Sync-ProductSkill($Entry) {
     $src = Join-Path (Split-Path $PSScriptRoot -Parent) "skills\$($script:SkillName)\SKILL.md"
@@ -128,6 +149,13 @@ function Sync-Settings($Entry) {
     $deny = @(Get-DsrDenyRules $reg $Entry)
     $dirs = @(Get-DsrReadableRoots $reg $Entry | ForEach-Object { $_.Replace('\', '/') })
 
+    # The lead agent runs as the home's main session through the 'agent' setting. Only an
+    # 'agent' value this script set is ever removed.
+    $lead = @(Get-DsrEntryAgents $reg $Entry | Where-Object Role -eq 'lead' | ForEach-Object Name) | Select-Object -First 1
+    $oldAgent = if (Test-Path -LiteralPath $managedFile) { [string](([IO.File]::ReadAllText($managedFile) | ConvertFrom-Json -AsHashtable).agent) } else { '' }
+    if ($lead) { $s.agent = $lead }
+    elseif ($oldAgent -and $s.Contains('agent') -and $s.agent -eq $oldAgent) { $s.Remove('agent') }
+
     if (-not $s.Contains('permissions') -or $null -eq $s.permissions) { $s.permissions = [ordered]@{} }
     foreach ($pair in @(@('deny', $deny), @('additionalDirectories', $dirs))) {
         $name = $pair[0]; $want = @($pair[1])
@@ -154,10 +182,12 @@ function Sync-Settings($Entry) {
     $s.hooks.PreToolUse = $groups
 
     $after = $s | ConvertTo-Json -Depth 32
-    $managed = [ordered]@{ deny = $deny; additionalDirectories = $dirs } | ConvertTo-Json -Depth 4
+    $m = [ordered]@{ deny = $deny; additionalDirectories = $dirs }
+    if ($lead) { $m.agent = $lead }
+    $managed = $m | ConvertTo-Json -Depth 4
     $managedNow = if (Test-Path -LiteralPath $managedFile) { [IO.File]::ReadAllText($managedFile) } else { '' }
     if ($after -ne $before -or $managed -ne $managedNow) {
-        $what = "update $file ($($deny.Count) deny rules, $($dirs.Count) additional dirs, guard hooks)"
+        $what = "update $file ($($deny.Count) deny rules, $($dirs.Count) additional dirs, guard hooks$(if ($lead) { ", main agent $lead" }))"
         Step $what { Write-TextFile $file $after; Write-TextFile $managedFile $managed }
     }
 }
@@ -240,6 +270,7 @@ foreach ($e in $reg.Entries) {
     Sync-Settings $e
     Sync-HomeClaudeMd $e
     Sync-SharedSkills $e
+    Sync-Agents $e
     if ($e.Kind -ne 'firm') {
         $md = Join-Path $e.Roots[0] 'CLAUDE.md'
         if (-not (Test-Path -LiteralPath $md)) { $t = Expand-Template "$($e.Kind).CLAUDE.md" $e; Step "create $md from template" { Write-TextFile $md $t } }

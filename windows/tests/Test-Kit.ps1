@@ -19,13 +19,14 @@ $env:DOSSIER_CONFIG = Join-Path $tmp '.dossier.json'
 $ws = Join-Path $tmp 'workspace'
 $substDrive = $null
 
-function Write-Registry($Clients, [string] $Personal = '~/.dossier/personal.md', [string[]] $Shared = @(), $Products = @()) {
+function Write-Registry($Clients, [string] $Personal = '~/.dossier/personal.md', [string[]] $Shared = @(), $Products = @(), $Agents = $null) {
     $r = [ordered]@{
         workspaceRoot = '~/workspace'; personalRules = $Personal; sharedSkills = $Shared
         firm = [ordered]@{ hubRoot = '~/workspace/hub'; sandboxRoot = '~/workspace/sandbox'; expectEmail = 'me@firm.test' }
         clients = $Clients
         products = @($Products)
     }
+    if ($Agents) { $r.agents = $Agents }
     [IO.File]::WriteAllText($env:DOSSIER_CONFIG, ($r | ConvertTo-Json -Depth 8))
 }
 $acme = [ordered]@{ key = 'acme'; name = 'Acme'; root = '~/workspace/clients/acme'; seat = 'enterprise'; expectEmail = 'me@acme.test'; formerRoots = @('~/workspace/acme-old') }
@@ -674,6 +675,73 @@ try {
     Write-Registry @($acmeB, $widget, $betaC, $gamma) -Products @($prod, $core)
     Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
     Check 'no basedOn: status file and skill removed' (-not (Test-Path $statusFile) -and -not (Test-Path "$wHome\skills\dossier-product"))
+
+    # --- agents
+    $roster = "$tmp\.dossier\agents"
+    New-Item -ItemType Directory -Path $roster -Force | Out-Null
+    function Agent([string] $Name, [string] $Body = 'Voice: dry.', [string] $Extra = "memory: user`n") {
+        [IO.File]::WriteAllText("$roster\$Name.md", "---`nname: $Name`ndescription: test agent $Name`n$($Extra)color: blue`n---`n`n$Body`n")
+    }
+    foreach ($n in 'chief', 'bob', 'rae', 'hal') { Agent $n }
+    $team = [ordered]@{ source = '~/.dossier/agents'; roles = [ordered]@{ lead = 'chief'; builder = 'bob'; reviewer = 'rae'; hr = 'hal' } }
+    $clients = @($acmeB, $widget, $betaC, $gamma)
+    $badAgents = @(
+        @{ n = 'an unknown role'; a = [ordered]@{ source = '~/.dossier/agents'; roles = @{ janitor = 'bob' } }; c = $clients },
+        @{ n = 'one agent in two roles'; a = [ordered]@{ source = '~/.dossier/agents'; roles = [ordered]@{ builder = 'bob'; reviewer = 'bob' } }; c = $clients },
+        @{ n = 'an agent name with a colon'; a = [ordered]@{ source = '~/.dossier/agents'; roles = @{ builder = 'x:y' } }; c = $clients },
+        @{ n = 'agents with no source'; a = [ordered]@{ roles = @{ builder = 'bob' } }; c = $clients },
+        @{ n = 'hr in a client home'; a = $team; c = @(With $widget @{ agentRoles = @('builder', 'hr') }) }
+    )
+    foreach ($b in $badAgents) {
+        Write-Registry $b.c -Products @($prod, $core) -Agents $b.a
+        $threw = $false; try { Read-DsrRegistry | Out-Null } catch { $threw = $true }
+        Check "registry rejects $($b.n)" $threw
+    }
+
+    $betaOne = With $betaC @{ agentRoles = @('builder') }
+    Write-Registry @($acmeB, $widget, $betaOne, $gamma) -Products @($prod, $core) -Agents $team
+    $r = Run 'Sync-Dossier.ps1' @('-Apply')
+    Check 'sync with agents exits 0' ($r.Code -eq 0) "$($r.Out) $($r.Err)"
+    $fHome = "$tmp\.claude"
+    Check 'firm home gets every role' ((Test-Path "$fHome\agents\chief.md") -and (Test-Path "$fHome\agents\bob.md") -and (Test-Path "$fHome\agents\rae.md") -and (Test-Path "$fHome\agents\hal.md"))
+    $rae = Get-Content -Raw "$fHome\agents\rae.md"
+    Check 'installed agent keeps the roster text, then its role contract and common rules' ($rae -match '(?s)\A---\nname: rae.*Voice: dry\..*managed by dossier: role contract.*## Role: reviewer.*Memory, in three layers')
+    Check 'firm main session runs as the lead' ((Read-Json "$fHome\settings.json").agent -eq 'chief')
+    Check 'client home gets the team without lead or hr' ((Test-Path "$wHome\agents\bob.md") -and (Test-Path "$wHome\agents\rae.md") -and -not (Test-Path "$wHome\agents\chief.md") -and -not (Test-Path "$wHome\agents\hal.md"))
+    Check 'client main session is left alone' (-not (Read-Json "$wHome\settings.json").Contains('agent'))
+    Check 'enterprise client home gets the team too' ((Test-Path "$tmp\.claude-homes\acme\agents\bob.md") -and -not (Test-Path "$tmp\.claude-homes\acme\agents\hal.md"))
+    Check 'product home gets the team' (Test-Path "$tmp\.claude-homes\core\agents\rae.md")
+    Check 'agentRoles narrows a home' ((Test-Path "$tmp\.claude-homes\beta\agents\bob.md") -and -not (Test-Path "$tmp\.claude-homes\beta\agents\rae.md"))
+    $r = Run 'Sync-Dossier.ps1' @('-Apply')
+    Check 'sync with agents is idempotent' ($r.Out -match 'In sync\.') $r.Out
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor lists a home''s agents' ($d.Out -match 'ok\s+\[firm\] agents: chief \(lead\), bob \(builder\), rae \(reviewer\), hal \(hr\)') $d.Out
+
+    # editing the roster: doctor sees it, Sync rolls it out
+    Agent 'rae' 'Voice: very dry.'
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor finds agents out of date' ($d.Out -match 'WARN\s+\[widgetco\] agents out of date: rae') $d.Out
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    Check 'sync rolls an edit out to every home' ((Get-Content -Raw "$wHome\agents\rae.md") -match 'very dry' -and (Get-Content -Raw "$fHome\agents\rae.md") -match 'very dry')
+    Agent 'bob' 'Voice: none.' ''
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor warns about an agent with no memory' ($d.Out -match "WARN\s+\[widgetco\] agent 'bob' has no 'memory: user'") $d.Out
+    Agent 'bob'
+    [IO.File]::WriteAllText("$roster\rae.md", "---`nname: ray`ndescription: x`n---`nbody`n")
+    $r = Run 'Sync-Dossier.ps1'
+    Check 'sync skips an agent whose file names another agent' ($r.Out -match "warn\s+.*rae\.md says name: 'ray'") $r.Out
+    Agent 'rae'
+
+    # dropping roles removes only Dossier's own files and settings
+    [IO.File]::WriteAllText("$wHome\agents\mine.md", "---`nname: mine`ndescription: hand-made`n---`n")
+    $s = Read-Json "$wHome\settings.json"; $s.agent = 'mine'; [IO.File]::WriteAllText("$wHome\settings.json", ($s | ConvertTo-Json -Depth 32))
+    $team2 = [ordered]@{ source = '~/.dossier/agents'; roles = [ordered]@{ builder = 'bob'; hr = 'hal' } }
+    Write-Registry @($acmeB, $widget, $betaOne, $gamma) -Products @($prod, $core) -Agents $team2
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    Check 'a dropped role''s agent is removed' (-not (Test-Path "$wHome\agents\rae.md") -and -not (Test-Path "$fHome\agents\rae.md"))
+    Check 'a hand-made agent file is left alone' (Test-Path "$wHome\agents\mine.md")
+    Check 'dropping the lead clears the setting Sync made' (-not (Read-Json "$fHome\settings.json").Contains('agent'))
+    Check 'a main agent the user set is left alone' ((Read-Json "$wHome\settings.json").agent -eq 'mine')
 } finally {
     if ($substDrive) { subst "${substDrive}:" /d 2>$null | Out-Null }
     foreach ($v in $saveVars) { [Environment]::SetEnvironmentVariable($v, $saved[$v]) }

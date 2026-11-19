@@ -55,6 +55,21 @@ foreach ($e in $reg.Entries) {
     } else { Report 'ok' "$tag deny rules in place" }
     if (-not (Test-DsrHooked $s 'SessionStart' 'dossier-guard.ps1')) { Report 'FAIL' "$tag guard hook not wired in $settingsFile" }
     if (-not (Test-DsrHooked $s 'PreToolUse' 'dossier-shellguard.ps1')) { Report 'FAIL' "$tag shell guard hook not wired in $settingsFile" }
+
+    $agents = @(Get-DsrEntryAgents $reg $e)
+    $stale = @()
+    foreach ($a in $agents) {
+        if (-not (Test-Path -LiteralPath $a.Source)) { Report 'WARN' "$tag agent '$($a.Name)' ($($a.Role)) has no file at $($a.Source)"; continue }
+        $fm = Get-DsrAgentFrontmatter ([IO.File]::ReadAllText($a.Source))
+        if ($fm['name'] -cne $a.Name) { Report 'WARN' "$tag $($a.Source) says name: '$($fm['name'])', not '$($a.Name)'"; continue }
+        if ($a.Role -ne 'lead' -and $fm['memory'] -ne 'user') { Report 'WARN' "$tag agent '$($a.Name)' has no 'memory: user', so it keeps no memory in this home" }
+        $dst = Join-Path $e.Home "agents\$($a.Name).md"
+        if (-not (Test-Path -LiteralPath $dst) -or [IO.File]::ReadAllText($dst) -ne (Get-DsrInstalledAgent $a)) { $stale += $a.Name }
+    }
+    if ($stale.Count) { Report 'WARN' "$tag agents out of date: $($stale -join ', ') (Sync-Dossier -Apply)" }
+    elseif ($agents.Count) { Report 'ok' "$tag agents: $(($agents | ForEach-Object { "$($_.Name) ($($_.Role))" }) -join ', ')" }
+    $lead = @($agents | Where-Object Role -eq 'lead' | ForEach-Object Name) | Select-Object -First 1
+    if ($lead -and (-not $s -or $s.agent -ne $lead)) { Report 'WARN' "$tag main session should run as '$lead', but $settingsFile doesn't set it (Sync-Dossier -Apply)" }
     if ($e.Kind -eq 'firm' -and $s -and $s.permissions -and $s.permissions.additionalDirectories) {
         foreach ($d in @($s.permissions.additionalDirectories)) {
             foreach ($c in @($reg.Entries | Where-Object Seat -eq 'enterprise')) {

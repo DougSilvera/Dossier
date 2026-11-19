@@ -1,6 +1,6 @@
 # Dossier
 
-Status: in use since 2026-11. 215 tests in `windows/tests/Test-Kit.ps1`.
+Status: in use since 2026-11. 239 tests in `windows/tests/Test-Kit.ps1`.
 
 ## Problem
 
@@ -53,6 +53,27 @@ A client repo starts from scratch, or as a clone or fork of a product code repo.
 - **Hub table:** "Based on by" lists each client's forks. For a no-seat client it shows the base and distance; for an enterprise client only which product repo, since the hub keeps enterprise clients to metadata.
 
 `Import-Dossier -Key <key> -Apply` brings a client or product onto the machine: Sync, clone each listed repo that isn't there yet, then the doctor. It refuses an enterprise-seat client from inside a Claude session.
+
+## Agents
+
+Dossier defines a small team of **roles**. Each person brings their own **agents** to fill them: their names, voices and working habits live in that person's own roster, not in Dossier.
+
+| Role | Job |
+|---|---|
+| `lead` | The home's main session: takes requests, briefs teammates, checks what they return. |
+| `builder` | Changes code in small tested steps and stops at a reviewable diff. |
+| `reviewer` | Reviews for correctness; never reviews its own work. |
+| `researcher` | Finds out what's true, with sources. |
+| `ops` | Runs and watches local services. |
+| `hr` | Creates and changes the agents themselves, in the roster only. |
+
+- **Roster:** a folder of Claude Code agent files, one per agent, ideally the person's own git repo. The registry's `agents` section names it and maps roles to agents: `"agents": { "source": "~/.dossier/agents", "roles": { "lead": "<name>", "builder": "<name>", ... } }`. An agent's file name and its frontmatter `name` must match the mapping.
+- **Role contracts:** Dossier ships one per role in `roles/`, plus `roles/_common.md` for every role (the three memory layers, boundaries, no commits or comments without the user's word). Sync installs each agent into a home as the roster's file followed by its role's contract and the common rules, after a marker. Agents load the session's `CLAUDE.md` files too, so personal and engagement rules apply to them.
+- **Which homes get which agents:** the firm home gets every role the roster fills. Product and client homes, enterprise seats included, get all but `lead` and `hr`. An entry's `agentRoles` narrows or widens that, but `hr` is accepted only on the firm: it edits the roster, and a client home must never write to it.
+- **Lead:** Sync sets the home's `agent` setting to the lead, so the main session runs as it. A custom agent's prompt likely replaces Claude Code's default system prompt, so the lead is opt-in outside the firm home. Sync removes only an `agent` value it set.
+- **Memory follows the home** (checked on Windows with Claude Code 2.1.328: an agent with `memory: user` in a home set by `CLAUDE_CONFIG_DIR` writes to `<home>/agent-memory/<name>/`). The same agent in two homes shares its definition but never its memory, so what it learns at an enterprise client stays in that client's home. The doctor warns about an agent without `memory: user`.
+- **Dispatch follows `cc`:** the lead hands work to teammates inside its own home, and to a no-seat client's home with `cc -a <key> --at-root -p`, where that home's copy of each agent uses that home's memory. An enterprise client's team is started by the user in that client's home; nothing dispatches into it.
+- **Memory layers:** an agent writes its own memory freely; it proposes engagement conventions (that root's `CLAUDE.md`) and personal rules, and waits for the user's OK.
 
 ## Data rule
 
@@ -128,7 +149,7 @@ Settings and `.mcp.json` are not inherited from parent folders, so client-wide M
 | `Import-Dossier.ps1` | Clones a registered client's or product's `repos` into its root after a Sync, then runs the doctor. Dry run unless `-Apply`. Never touches an existing folder. |
 | `dossier-guard.ps1` | SessionStart hook. Silent to the person when everything matches; gives a based-on client session a model-only product note. |
 | `dossier-shellguard.ps1` | PreToolUse hook for Bash and PowerShell. Denies commands that reach a path the home's `Read` deny rules cover, and writes to a path it may only read; silent otherwise. |
-| `tests/Test-Kit.ps1` | 215 checks against a throwaway `USERPROFILE` and a stub `claude`. |
+| `tests/Test-Kit.ps1` | 239 checks against a throwaway `USERPROFILE` and a stub `claude`. |
 
 Setting up a home: `Sync-Dossier -Apply`, then `cc -a <key>` and `/login` as the expected account, then `Test-Dossier`.
 
