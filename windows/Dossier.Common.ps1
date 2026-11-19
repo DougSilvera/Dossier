@@ -149,7 +149,12 @@ function Read-DsrRepos($Raw, [string] $What) {
         if ([string]::IsNullOrWhiteSpace($remote) -or $remote.StartsWith('-')) { throw "$What repos: remote '$remote' is empty or starts with -" }
         $dir = [string]($r.dir ?? (($remote.TrimEnd('/') -split '[/:\\]')[-1] -replace '\.git$', ''))
         if ($dir -notmatch '^[A-Za-z0-9._-]+$' -or $dir -in @('.', '..')) { throw "$What repos: folder name '$dir' for $remote is not a plain name; set dir" }
-        [pscustomobject]@{ Remote = $remote; Dir = $dir }
+        $from = $null
+        if ($null -ne $r.from) {
+            if (-not $r.from.product -or -not $r.from.repo) { throw "$What repos: '$dir' from needs both product and repo" }
+            $from = [pscustomobject]@{ Product = [string]$r.from.product; Repo = [string]$r.from.repo }
+        }
+        [pscustomobject]@{ Remote = $remote; Dir = $dir; From = $from }
     })
 }
 
@@ -241,6 +246,15 @@ function Read-DsrRegistry {
         })
     }
 
+    foreach ($e in @($entries | Where-Object Kind -eq 'client')) {
+        foreach ($rp in @($e.Repos | Where-Object From)) {
+            $p = $entries | Where-Object { $_.Kind -eq 'product' -and $_.Key -ceq $rp.From.Product } | Select-Object -First 1
+            if (-not $p) { throw "client '$($e.Key)' repo '$($rp.Dir)' is from '$($rp.From.Product)', which is not a product in the registry" }
+            if ($p.Key -cnotin $e.BasedOn) { throw "client '$($e.Key)' repo '$($rp.Dir)' is from '$($p.Key)', but the client isn't basedOn it" }
+            if ($rp.From.Repo -cnotin @($p.Repos | ForEach-Object Dir)) { throw "client '$($e.Key)' repo '$($rp.Dir)' is from '$($p.Key)/$($rp.From.Repo)', which is not one of that product's repos" }
+        }
+    }
+
     $workspace = Resolve-DsrRegistryPath ([string]$raw.workspaceRoot) 'workspaceRoot'
     $all = @(foreach ($e in $entries) { foreach ($r in $e.Roots) { [pscustomobject]@{ Key = $e.Key; Root = $r } } })
     foreach ($x in $all) {
@@ -292,6 +306,53 @@ function Test-DsrProductBlocked($Client, $Product) {
 
 function Get-DsrClientReadPaths($Product) {
     return @($Product.ClientRead | ForEach-Object { Join-Path $Product.Roots[0] $_ })
+}
+
+function Test-DsrRepoClientReadable($Product, [string] $Dir) {
+    # A product repo a client forks must be readable in full: the fork carries its whole history.
+    $path = Join-Path $Product.Roots[0] $Dir
+    return [bool]@(Get-DsrClientReadPaths $Product | Where-Object { Test-DsrUnder $path $_ }).Count
+}
+
+function Get-DsrStatusFile($Entry) { return (Join-Path $Entry.Home 'dossier.products.json') }
+
+function Get-DsrForkStatus([string] $ClientRepo, [string] $ProductRepo) {
+    # The base is the newest product commit in the client repo's history (not merely its object
+    # store, which a fetch fills without merging).
+    $o = [ordered]@{ state = ''; base = $null; behind = 0; changed = @() }
+    if (-not (Test-Path -LiteralPath (Join-Path $ClientRepo '.git'))) { $o.state = 'not-cloned'; return $o }
+    if (-not (Test-Path -LiteralPath (Join-Path $ProductRepo '.git'))) { $o.state = 'product-not-cloned'; return $o }
+    $mine = [Collections.Generic.HashSet[string]]::new([string[]]@(git -C $ClientRepo rev-list HEAD 2>$null))
+    foreach ($sha in @(git -C $ProductRepo rev-list HEAD 2>$null)) { if ($mine.Contains($sha)) { $o.base = $sha; break } }
+    if (-not $o.base) { $o.state = 'no-shared-commit'; return $o }
+    $o.behind = [int](git -C $ProductRepo rev-list --count "$($o.base)..HEAD")
+    $o.changed = @(git -C $ProductRepo diff --name-only $o.base HEAD)
+    $o.state = 'ok'
+    return $o
+}
+
+function Get-DsrProductStatus($Reg, $Client) {
+    # What a client home may know about the products it is based on: only readable paths, heads
+    # of fully readable repos, and for each fork its base, distance and changed file names.
+    # Never commit messages.
+    return @(foreach ($p in @(Get-DsrProducts $Reg | Where-Object { $_.Key -cin $Client.BasedOn })) {
+        $x = [ordered]@{ key = $p.Key; name = $p.Name; readable = (Test-DsrProductReadable $Client $p) }
+        if ($x.readable) {
+            $x.paths = @(Get-DsrClientReadPaths $p)
+            $x.repos = @(foreach ($r in $p.Repos) {
+                if (-not (Test-DsrRepoClientReadable $p $r.Dir)) { continue }
+                $rp = Join-Path $p.Roots[0] $r.Dir
+                [ordered]@{ dir = $r.Dir; path = $rp; head = $(if (Test-Path -LiteralPath (Join-Path $rp '.git')) { [string](git -C $rp rev-parse HEAD 2>$null) } else { $null }) }
+            })
+            $x.forks = @(foreach ($cr in @($Client.Repos | Where-Object { $_.From -and $_.From.Product -ceq $p.Key })) {
+                $f = [ordered]@{ dir = $cr.Dir; productRepo = $cr.From.Repo }
+                $s = if (Test-DsrRepoClientReadable $p $cr.From.Repo) { Get-DsrForkStatus (Join-Path $Client.Roots[0] $cr.Dir) (Join-Path $p.Roots[0] $cr.From.Repo) } else { [ordered]@{ state = 'product-repo-not-readable' } }
+                foreach ($k in $s.Keys) { $f[$k] = $s[$k] }
+                $f
+            })
+        }
+        $x
+    })
 }
 
 function Get-DsrProductReadDenies($Product) {

@@ -6,10 +6,11 @@
 #       above a client or product root (it would load into every session there); missing deny
 #       rules (including product folders added since the last Sync) or guard hooks; an
 #       enterprise root readable from the firm home; one entry's memory or transcripts stored in
-#       another entry's home.
+#       another entry's home; a client repo forked from a product repo clients can't read in full.
 # WARN  a home not logged in yet; folders under the workspace in no registered root; an
 #       enterprise client based on a product that doesn't allow enterprise reads; registered
-#       repos not cloned yet; leftover claude-multi-account-kit wiring.
+#       repos not cloned yet; a based-on client with no product status; a fork that shares no
+#       commit with its product repo; leftover claude-multi-account-kit wiring.
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\Dossier.Common.ps1"
@@ -91,6 +92,21 @@ foreach ($c in @($reg.Entries | Where-Object Kind -ne 'firm')) {
 foreach ($p in (Get-DsrProducts $reg)) {
     foreach ($c in @($reg.Entries | Where-Object { Test-DsrProductBlocked $_ $p })) {
         Report 'WARN' "[$($c.Key)] is based on product '$($p.Key)', but it is an enterprise seat and the product doesn't set enterpriseRead; it has no access"
+    }
+}
+
+foreach ($c in @($reg.Entries | Where-Object { $_.Kind -eq 'client' -and $_.BasedOn.Count })) {
+    foreach ($r in @($c.Repos | Where-Object From)) {
+        $p = Find-DsrEntry $reg $r.From.Product
+        if (-not (Test-DsrRepoClientReadable $p $r.From.Repo)) {
+            Report 'FAIL' "[$($c.Key)] repo '$($r.Dir)' is a fork of '$($p.Key)/$($r.From.Repo)', but clientRead doesn't cover all of that repo; a fork carries its whole history to the client"
+        }
+    }
+    $file = Get-DsrStatusFile $c
+    if (-not (Test-Path -LiteralPath $file)) { Report 'WARN' "[$($c.Key)] no product status yet; run Sync-Dossier -Apply$(if ($c.Seat -eq 'enterprise') { ' from your own terminal' })"; continue }
+    try { $st = [IO.File]::ReadAllText($file) | ConvertFrom-Json } catch { Report 'WARN' "[$($c.Key)] $file doesn't parse; run Sync-Dossier -Apply"; continue }
+    foreach ($f in @($st.products | ForEach-Object { @($_.forks) } | Where-Object { $_ -and $_.state -eq 'no-shared-commit' })) {
+        Report 'WARN' "[$($c.Key)] repo '$($f.dir)' is registered as a fork of '$($f.productRepo)', but shares no commit with it (a squashed import, or the wrong repo)"
     }
 }
 

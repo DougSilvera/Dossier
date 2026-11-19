@@ -32,10 +32,10 @@ function Step([string] $What, [scriptblock] $Do) {
     if ($Apply) { & $Do; Write-Host "  done  $What" } else { Write-Host "  plan  $What" }
 }
 
-function Write-TextFile([string] $Path, [string] $Text) {
+function Write-TextFile([string] $Path, [string] $Text, [switch] $NoBackup) {
     $dir = Split-Path $Path -Parent
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    if (Test-Path -LiteralPath $Path) { Copy-Item -LiteralPath $Path -Destination ("{0}.{1:yyyyMMdd-HHmmss-fff}.bak" -f $Path, (Get-Date)) -Force }
+    if (-not $NoBackup -and (Test-Path -LiteralPath $Path)) { Copy-Item -LiteralPath $Path -Destination ("{0}.{1:yyyyMMdd-HHmmss-fff}.bak" -f $Path, (Get-Date)) -Force }
     [IO.File]::WriteAllText($Path, $Text, [Text.UTF8Encoding]::new($false))
 }
 
@@ -44,19 +44,68 @@ function Expand-Template([string] $Name, $Entry) {
     if ($Entry) {
         $t = $t.Replace('{{name}}', $Entry.Name).Replace('{{key}}', $Entry.Key).Replace('{{seat}}', $Entry.Seat)
         $t = $t.Replace('{{home}}', $Entry.Home).Replace('{{expectEmail}}', (Get-DsrExpectText $Entry))
-        $t = $t.Replace('{{products}}', (Get-ClientProductsSection $Entry))
+        $t = $t.Replace('{{products}}', ($script:ProductsBegin + "`n" + (Get-ClientProductsSection $Entry) + $script:ProductsEnd + "`n`n"))
     }
     return $t
 }
+
+$script:ProductsBegin = '<!-- BEGIN GENERATED: Sync-Dossier products -->'
+$script:ProductsEnd = '<!-- END GENERATED: Sync-Dossier products -->'
 
 function Get-ClientProductsSection($Entry) {
     $based = @(Get-DsrProducts $reg | Where-Object { $_.Key -cin $Entry.BasedOn })
     if (-not $based.Count) { return '' }
     $list = ($based | ForEach-Object {
-        $paths = if (Test-DsrProductReadable $Entry $_) { (Get-DsrClientReadPaths $_ | ForEach-Object { "``$_``" }) -join ', ' } else { 'nothing readable from this home yet' }
-        "- $($_.Name): $paths"
+        $p = $_
+        $paths = if (Test-DsrProductReadable $Entry $p) { (Get-DsrClientReadPaths $p | ForEach-Object { "``$_``" }) -join ', ' } else { 'nothing readable from this home yet' }
+        $forks = @($Entry.Repos | Where-Object { $_.From -and $_.From.Product -ceq $p.Key } | ForEach-Object { "`n  - Repo ``$($_.Dir)`` is a fork of ``$(Join-Path $p.Roots[0] $_.From.Repo)``" })
+        "- $($p.Name): $paths$($forks -join '')"
     }) -join "`n"
-    return "## Products`n`nBuilt on these firm products. Only the paths listed are readable from this home, and none are editable.`n`n$list`n`nIf something here looks worth promoting back into a product, describe it to the user as a candidate and stop. Never copy this client's code, memory or tickets toward a product.`n`n"
+    return "## Products`n`nBuilt on these firm products. Only the paths listed are readable from this home, and none are editable. The session-start note and the dossier-product skill say how far each fork is behind.`n`n$list`n`nIf something here looks worth promoting back into a product, describe it to the user as a candidate and stop. Never copy this client's code, memory or tickets toward a product.`n"
+}
+
+function Sync-ClientProductsMd($Entry) {
+    $file = Join-Path $Entry.Roots[0] 'CLAUDE.md'
+    if (-not (Test-Path -LiteralPath $file)) { return }
+    $cur = [IO.File]::ReadAllText($file)
+    $i = $cur.IndexOf($script:ProductsBegin); $j = $cur.IndexOf($script:ProductsEnd)
+    if ($i -lt 0 -or $j -lt $i) {
+        if ($Entry.BasedOn.Count) { Write-Host "  note  $file has no products markers; add $($script:ProductsBegin) and $($script:ProductsEnd) to keep its Products section current" }
+        return
+    }
+    $next = $cur.Substring(0, $i + $script:ProductsBegin.Length) + "`n" + (Get-ClientProductsSection $Entry) + $cur.Substring($j)
+    if ($next -ne $cur) { Step "write Products section in $file" { Write-TextFile $file $next } }
+}
+
+$script:status = @{}
+function Sync-ProductStatus($Entry) {
+    $file = Get-DsrStatusFile $Entry
+    if (-not $Entry.BasedOn.Count) {
+        if (Test-Path -LiteralPath $file) { Step "remove $file (no longer based on a product)" { Remove-Item -LiteralPath $file } }
+        return
+    }
+    # Working this out reads the client's repos; for an enterprise seat that happens only outside
+    # a Claude session.
+    if ($Entry.Seat -eq 'enterprise' -and $env:CLAUDECODE) { Write-Host "  skip  product status for '$($Entry.Key)': an enterprise client's repos are read only from your own terminal"; return }
+    $data = @(Get-DsrProductStatus $reg $Entry)
+    $script:status[$Entry.Key] = $data
+    $text = [ordered]@{ syncedAt = (Get-Date -Format 'yyyy-MM-dd HH:mm'); products = $data } | ConvertTo-Json -Depth 10
+    $stamp = '"syncedAt": "[^"]*"'
+    if ((Test-Path -LiteralPath $file) -and ([IO.File]::ReadAllText($file) -replace $stamp, '') -eq ($text -replace $stamp, '')) { return }
+    Step "write $file (product status)" { Write-TextFile $file $text -NoBackup }
+}
+
+$script:SkillName = 'dossier-product'
+function Sync-ProductSkill($Entry) {
+    $src = Join-Path (Split-Path $PSScriptRoot -Parent) "skills\$($script:SkillName)\SKILL.md"
+    $dir = Join-Path $Entry.Home "skills\$($script:SkillName)"
+    $dst = Join-Path $dir 'SKILL.md'
+    $want = [IO.File]::ReadAllText($src)
+    if ($Entry.BasedOn.Count) {
+        if (-not (Test-Path -LiteralPath $dst) -or [IO.File]::ReadAllText($dst) -ne $want) { Step "write $dst" { Write-TextFile $dst $want -NoBackup } }
+    } elseif ((Test-Path -LiteralPath $dst) -and [IO.File]::ReadAllText($dst).Contains($script:DsrManagedMarker)) {
+        Step "remove $dir (no longer based on a product)" { Remove-Item -LiteralPath $dir -Recurse -Force }
+    }
 }
 
 function Ensure-Dir([string] $Path) {
@@ -158,7 +207,19 @@ function Sync-HubClaudeMd {
         $rows += @('', '## Products', '', 'Firm-owned products, each with its own home. The hub reads and edits them and reads their memory. Clients based on one read only its clientRead paths, and never edit it.', '')
         $rows += @('| Key | Product | Root | Home | Login | Client read | Enterprise read | Based on by | Status |', '|---|---|---|---|---|---|---|---|---|')
         foreach ($p in $products) {
-            $users = @($reg.Entries | Where-Object { $p.Key -cin $_.BasedOn } | ForEach-Object { if (Test-DsrProductBlocked $_ $p) { "$($_.Key) (blocked: enterprise)" } else { $_.Key } })
+            $users = @($reg.Entries | Where-Object { $p.Key -cin $_.BasedOn } | ForEach-Object {
+                $c = $_
+                if (Test-DsrProductBlocked $c $p) { return "$($c.Key) (blocked: enterprise)" }
+                $known = @($script:status[$c.Key] | Where-Object { $_.key -ceq $p.Key } | ForEach-Object { $_.forks })
+                $forks = @($c.Repos | Where-Object { $_.From -and $_.From.Product -ceq $p.Key } | ForEach-Object {
+                    $f = $_; $s = $known | Where-Object { $_.dir -ceq $f.Dir } | Select-Object -First 1
+                    # The hub keeps enterprise clients to metadata: which product repo, not where they are on it.
+                    if ($c.Seat -eq 'enterprise' -or -not $s) { "``$($f.Dir)`` from ``$($f.From.Repo)``" }
+                    elseif ($s.state -eq 'ok') { "``$($f.Dir)`` @ $($s.base.Substring(0, 7)), $($s.behind) behind" }
+                    else { "``$($f.Dir)`` $($s.state)" }
+                })
+                if ($forks.Count) { "$($c.Key) ($($forks -join '; '))" } else { $c.Key }
+            })
             $read = if ($p.ClientRead.Count) { ($p.ClientRead | ForEach-Object { "``$_``" }) -join ', ' } else { 'nothing' }
             $rows += "| $($p.Key) | $($p.Name) | ``$($p.Roots[0])`` | ``$($p.Home)`` | $(Get-DsrExpectText $p) | $read | $(if ($p.EnterpriseRead) { 'yes' } else { 'no' }) | $($users -join ', ') | $($p.Status) |"
         }
@@ -182,6 +243,11 @@ foreach ($e in $reg.Entries) {
     if ($e.Kind -ne 'firm') {
         $md = Join-Path $e.Roots[0] 'CLAUDE.md'
         if (-not (Test-Path -LiteralPath $md)) { $t = Expand-Template "$($e.Kind).CLAUDE.md" $e; Step "create $md from template" { Write-TextFile $md $t } }
+    }
+    if ($e.Kind -eq 'client') {
+        Sync-ClientProductsMd $e
+        Sync-ProductStatus $e
+        Sync-ProductSkill $e
     }
     if ($e.Kind -eq 'product') {
         foreach ($c in @($reg.Entries | Where-Object { Test-DsrProductBlocked $_ $e })) {

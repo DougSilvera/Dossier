@@ -7,7 +7,9 @@
 #   Right home, logged in to the wrong account             -> CRITICAL
 #   Folder under the workspace but in no registered root   -> NOTE
 #   Can't read what it needs                               -> INDETERMINATE note
-#   Everything matches                                     -> silent
+#   Everything matches                                     -> silent; a client based on a product
+#                                                             gets a note for the model only, from
+#                                                             the status file Sync wrote
 # Unlike claude-multi-account-kit's guard, the same login in a different home is not OK: two
 # entries on one account (the firm and a no-seat client) still must not share config.
 
@@ -18,6 +20,30 @@ function Out-Guard([string] $ForPerson, [string] $ForModel) {
     $o = [ordered]@{ systemMessage = "[dossier-guard] $ForPerson" }
     if ($ForModel) { $o.hookSpecificOutput = [ordered]@{ hookEventName = 'SessionStart'; additionalContext = $ForModel } }
     [Console]::Out.Write(($o | ConvertTo-Json -Depth 5 -Compress))
+}
+
+function Get-ProductNote($Client) {
+    # A model-only note for a client session: its products, from the status file Sync wrote.
+    $file = Get-DsrStatusFile $Client
+    if (-not (Test-Path -LiteralPath $file)) { return "Dossier: this client is based on $($Client.BasedOn -join ', '), but no product status has been written yet; it appears after the user next runs Sync-Dossier." }
+    $st = [IO.File]::ReadAllText($file) | ConvertFrom-Json
+    $lines = @(foreach ($p in @($st.products)) {
+        if (-not $p.readable) { "Built on $($p.name) ($($p.key)); nothing in it is readable from this home."; continue }
+        "Built on $($p.name) ($($p.key)). Readable, never editable: $(@($p.paths) -join ', ')."
+        foreach ($f in @($p.forks)) {
+            switch ($f.state) {
+                'ok' {
+                    $changed = @($f.changed)
+                    $list = if ($changed.Count) { " Changed: $(($changed | Select-Object -First 10) -join ', ')$(if ($changed.Count -gt 10) { ", and $($changed.Count - 10) more" })." } else { '' }
+                    "Repo $($f.dir) is a fork of $($p.key)/$($f.productRepo) at $(([string]$f.base).Substring(0, 7)); the product has $($f.behind) newer commit(s).$list"
+                }
+                'no-shared-commit' { "Repo $($f.dir) is registered as a fork of $($p.key)/$($f.productRepo), but shares no commit with it." }
+                default { "Repo $($f.dir) (fork of $($p.key)/$($f.productRepo)): $($f.state)." }
+            }
+        }
+    })
+    if (-not $lines.Count) { return $null }
+    return "Dossier, as of the last Sync ($($st.syncedAt)): " + ($lines -join ' ') + ' The dossier-product skill covers comparing with the product and bringing its changes forward. Nothing goes from this client toward a product.'
 }
 
 try {
@@ -53,6 +79,10 @@ try {
             $msg = "CRITICAL: '$($o.Key)' should be logged in as $(Get-DsrExpectText $o), but this home is logged in as $($id.Email). Run /logout, then /login."
             Out-Guard $msg "Dossier guard: $msg Tell the user before doing anything else."
             exit 0
+        }
+        if ($o.Kind -eq 'client' -and $o.BasedOn.Count) {
+            $note = Get-ProductNote $o
+            if ($note) { [Console]::Out.Write(([ordered]@{ hookSpecificOutput = [ordered]@{ hookEventName = 'SessionStart'; additionalContext = $note } } | ConvertTo-Json -Depth 5 -Compress)) }
         }
         exit 0
     }

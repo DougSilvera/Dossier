@@ -1,6 +1,6 @@
 # Dossier
 
-Status: in use since 2026-11. 187 tests in `windows/tests/Test-Kit.ps1`.
+Status: in use since 2026-11. 215 tests in `windows/tests/Test-Kit.ps1`.
 
 ## Problem
 
@@ -39,6 +39,18 @@ A product is firm-owned work that client work is built on: a reusable codebase, 
 - **Drift:** anything added at a listed level after Sync (a folder from a `git pull`, say) is readable by based-on clients until the next Sync. The doctor recomputes the rules from disk and fails with "product changed on disk since the last Sync", so rerun Sync after pulling a product that clients read.
 - **Instructions:** the product root's `CLAUDE.md` (Sync writes a stub) holds working notes about the product; each repo's own `CLAUDE.md` holds its conventions. A based-on client's stub lists the product and the paths it may read.
 - **Promoting from clients:** manual. The hub, product and client `CLAUDE.md` stubs say to report a client pattern worth promoting as a candidate to the user, and to move nothing from a client toward a product unless the user says so in that turn. Client and product homes are kept apart by deny rules. The firm home can read no-seat clients and edit products, so there it's an instruction only.
+
+### Client repos built on a product
+
+A client repo starts from scratch, or as a clone or fork of a product code repo. A fork carries that repo's whole history, so the product repo must sit entirely inside `clientRead`; the doctor fails a fork of a repo that doesn't.
+
+- **Registry:** a client repo that forks a product repo says so with `"from": { "product": "<key>", "repo": "<product repo dir>" }`. The product must be in the client's `basedOn`, and the repo one of the product's `repos`. Nothing about the product goes into the client's own repo.
+- **Base, detected:** Sync takes the newest product commit in the client repo's history (not merely its object store, which a fetch fills without merging) as the fork's base, a bare commit hash. Bringing product changes forward moves it with no registry edit. A squashed import shares no commit; the doctor warns instead of guessing.
+- **Status file:** Sync writes `<client home>/dossier.products.json`: per product, the readable paths, the heads of fully readable product repos, and per fork its base, the number of product commits since and the names of files changed since. Never commit messages, which can name prospects. Sync reads both sides' git data as a script outside the client's deny rules, and only these results cross. For an enterprise seat it does this only outside a Claude session.
+- **Session note:** the guard gives a based-on client session a model-only note from the status file: its products, readable paths, and how far each fork is behind as of the last Sync.
+- **Client `CLAUDE.md`:** Sync keeps a Products section between `<!-- BEGIN GENERATED: Sync-Dossier products -->` and `<!-- END GENERATED: Sync-Dossier products -->`. New client stubs have the markers; an existing file gets a note on how to add them.
+- **Skill:** Sync copies `skills/dossier-product` into based-on client homes, and removes it when `basedOn` empties. It covers reading the status file, comparing with the product, and bringing product changes forward (`git fetch <product repo path>`, a merge left uncommitted for the user), and never writing toward the product.
+- **Hub table:** "Based on by" lists each client's forks. For a no-seat client it shows the base and distance; for an enterprise client only which product repo, since the hub keeps enterprise clients to metadata.
 
 `Import-Dossier -Key <key> -Apply` brings a client or product onto the machine: Sync, clone each listed repo that isn't there yet, then the doctor. It refuses an enterprise-seat client from inside a Claude session.
 
@@ -114,9 +126,9 @@ Settings and `.mcp.json` are not inherited from parent folders, so client-wide M
 | `Sync-Dossier.ps1` | Makes the machine match the registry: roots, homes, deny rules, `additionalDirectories`, guard hooks, personal `CLAUDE.md`, shared skills, hub tables, client and product stubs. Dry run unless `-Apply`. Only removes rules it added (tracked in `<home>\dossier.managed.json`); never overwrites a `CLAUDE.md` it didn't write. Every file it rewrites keeps a timestamped `.bak`. |
 | `Test-Dossier.ps1` | Read-only doctor: logins, cross-home links, ancestor `CLAUDE.md`, deny rules, guard hooks, one entry's memory in another's home (including `formerRoots`), unregistered folders, product folders added since the last Sync, products blocked for an enterprise client, repos not cloned yet, leftover kit wiring. |
 | `Import-Dossier.ps1` | Clones a registered client's or product's `repos` into its root after a Sync, then runs the doctor. Dry run unless `-Apply`. Never touches an existing folder. |
-| `dossier-guard.ps1` | SessionStart hook. Silent when everything matches. |
+| `dossier-guard.ps1` | SessionStart hook. Silent to the person when everything matches; gives a based-on client session a model-only product note. |
 | `dossier-shellguard.ps1` | PreToolUse hook for Bash and PowerShell. Denies commands that reach a path the home's `Read` deny rules cover, and writes to a path it may only read; silent otherwise. |
-| `tests/Test-Kit.ps1` | 187 checks against a throwaway `USERPROFILE` and a stub `claude`. |
+| `tests/Test-Kit.ps1` | 215 checks against a throwaway `USERPROFILE` and a stub `claude`. |
 
 Setting up a home: `Sync-Dossier -Apply`, then `cc -a <key>` and `/login` as the expected account, then `Test-Dossier`.
 

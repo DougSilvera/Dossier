@@ -29,7 +29,8 @@
       "seat": "none",
       "expectEmail": "you@yourfirm.example",
       "basedOn": ["base-app"],
-      "repos": [{ "remote": "git@github.com:widgetco/widget-app.git" }],
+      "repos": [{ "remote": "git@github.com:widgetco/widget-app.git",
+                  "from": { "product": "base-app", "repo": "base-app" } }],
       "status": "active"
     }
   ],
@@ -38,7 +39,7 @@
       "key": "base-app",
       "name": "Base App",
       "root": "~/workspace/products/base-app",
-      "clientRead": ["base-app/src", "base-app/docs/public"],
+      "clientRead": ["base-app"],
       "enterpriseRead": false,
       "repos": [{ "remote": "git@github.com:yourfirm/base-app.git" }],
       "status": "active"

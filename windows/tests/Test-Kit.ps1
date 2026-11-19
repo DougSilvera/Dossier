@@ -568,6 +568,112 @@ try {
     Write-Registry @($acmeB, $widgetB, $beta, $gamma) -Products @($prod)
     $reg = Read-DsrRegistry
     Check 'an uncloned repo beside clientRead is denied ahead of time' (@(Get-DsrProductReadDenies (Find-DsrEntry $reg 'base') | Where-Object { $_.Path -eq "$pRoot\later" }).Count -eq 1)
+
+    # --- client base repos
+    function GitIn([string] $Dir, [string[]] $GitArgs) { return (RunExe 'git' (@('-C', $Dir, '-c', 'user.name=t', '-c', 'user.email=t@t.test') + $GitArgs) $tmp) }
+    function Commit([string] $Dir, [string] $File) { [IO.File]::WriteAllText("$Dir\$File", $File); GitIn $Dir @('add', '.') | Out-Null; GitIn $Dir @('commit', '-q', '-m', $File) | Out-Null; return (GitIn $Dir @('rev-parse', 'HEAD')).Out.Trim() }
+    $src2 = Join-Path $tmp 'src2'
+    RunExe 'git' @('init', '-q', $src2) $tmp | Out-Null
+    $c1 = Commit $src2 'a.txt'; $c2 = Commit $src2 'b.txt'
+    $wApp = "$ws\clients\widgetco\w-app"
+    RunExe 'git' @('clone', '-q', $src2, $wApp) $tmp | Out-Null
+    $c3 = Commit $src2 'c.txt'
+
+    $core = [ordered]@{ key = 'core'; name = 'Core'; root = '~/workspace/products/core'; clientRead = @('app'); repos = @(@{ remote = $src2; dir = 'app' }) }
+    $fork = @{ remote = $src2; dir = 'w-app'; from = @{ product = 'core'; repo = 'app' } }
+    $badFrom = @(
+        @{ n = 'a fork of a product the client isn''t based on'; c = With $widget @{ basedOn = @('base'); repos = @($fork) } },
+        @{ n = 'a fork of a repo the product doesn''t have'; c = With $widget @{ basedOn = @('core'); repos = @(@{ remote = $src2; dir = 'w-app'; from = @{ product = 'core'; repo = 'nope' } }) } },
+        @{ n = 'a fork with no repo'; c = With $widget @{ basedOn = @('core'); repos = @(@{ remote = $src2; dir = 'w-app'; from = @{ product = 'core' } }) } }
+    )
+    foreach ($b in $badFrom) {
+        Write-Registry @($b.c) -Products @($prod, $core)
+        $threw = $false; try { Read-DsrRegistry | Out-Null } catch { $threw = $true }
+        Check "registry rejects $($b.n)" $threw
+    }
+
+    $widgetC = With $widget @{ basedOn = @('base', 'core'); repos = @($fork) }
+    $betaC = With $beta @{ basedOn = @('base', 'core') }
+    Write-Registry @($acmeB, $widgetC, $betaC, $gamma) -Products @($prod, $core)
+    $r = Run 'Import-Dossier.ps1' @('-Key', 'core', '-Apply')
+    Check 'import clones the product code repo' ($r.Code -eq 0 -and (Test-Path "$ws\products\core\app\c.txt")) "$($r.Out) $($r.Err)"
+    $wMd = "$ws\clients\widgetco\CLAUDE.md"
+    [IO.File]::WriteAllText($wMd, ((Get-Content -Raw $wMd) -replace '<!-- (BEGIN|END) GENERATED: Sync-Dossier products -->', ''))
+    $r = Run 'Sync-Dossier.ps1' @('-Apply')
+    Check 'sync with forks exits 0' ($r.Code -eq 0) "$($r.Out) $($r.Err)"
+    Check 'sync notes a client CLAUDE.md without products markers' ($r.Out -match 'note\s+.*widgetco\\CLAUDE\.md has no products markers') $r.Out
+    Set-Login "$tmp\.claude-homes\gamma\.claude.json" 'me@firm.test'
+    $statusFile = "$wHome\dossier.products.json"
+    $st = Read-Json $statusFile
+    $sc = $st.products | Where-Object { $_.key -eq 'core' }
+    $f = $sc.forks[0]
+    Check 'status: the fork''s base is the newest shared commit' ($f.state -eq 'ok' -and $f.base -eq $c2 -and $f.behind -eq 1) ($st | ConvertTo-Json -Depth 10)
+    Check 'status: changed file names since the base' (@($f.changed) -contains 'c.txt' -and @($f.changed).Count -eq 1)
+    Check 'status: the product repo head' ($sc.repos[0].head -eq $c3)
+    Check 'status: no commit messages' ((Get-Content -Raw $statusFile) -notmatch '"message"|"subject"')
+    $sb = $st.products | Where-Object { $_.key -eq 'base' }
+    Check 'status: a product with only part readable lists no repo heads' ($sb.readable -and @($sb.repos).Count -eq 0)
+    Check 'status: none for a client based on nothing' (-not (Test-Path "$tmp\.claude-homes\gamma\dossier.products.json"))
+    Check 'skill copied into a based-on client home' ((Get-Content -Raw "$wHome\skills\dossier-product\SKILL.md") -match 'name: dossier-product')
+    Check 'skill not in a client based on nothing' (-not (Test-Path "$tmp\.claude-homes\gamma\skills\dossier-product"))
+    Check 'client CLAUDE.md products section stays current' ((Get-Content -Raw "$ws\clients\beta\CLAUDE.md") -match '- Core: `[^`]*products\\core\\app`')
+    $hub = Get-Content -Raw "$ws\hub\CLAUDE.md"
+    Check 'hub table shows a no-seat fork''s base and distance' ($hub -match "widgetco \(``w-app`` @ $($c2.Substring(0, 7)), 1 behind\)") $hub
+    $r = Run 'Sync-Dossier.ps1' @('-Apply')
+    Check 'sync with forks is idempotent' ($r.Out -match 'In sync\.') $r.Out
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor passes forks of a fully readable repo' ($d.Code -eq 0 -and $d.Out -notmatch 'shares no commit') $d.Out
+
+    $g = Guard $wApp $wHome
+    $ctx = try { ($g.Out | ConvertFrom-Json).hookSpecificOutput.additionalContext } catch { '' }
+    Check 'guard: a based-on client gets a model-only product note' ($ctx -match "fork of core/app at $($c2.Substring(0, 7)); the product has 1 newer commit" -and $ctx -match 'Changed: c\.txt' -and $g.Out -notmatch 'systemMessage') $g.Out
+    $g = Guard "$ws\clients\gamma" "$tmp\.claude-homes\gamma"
+    Check 'guard: a client based on nothing stays silent' ($g.Out -eq '') $g.Out
+
+    # fetched but not merged doesn't move the base; merging does
+    $coreApp = "$ws\products\core\app"
+    $c4 = Commit $coreApp 'd.txt'
+    GitIn $wApp @('fetch', '-q', $coreApp, 'HEAD') | Out-Null
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    $f = ((Read-Json $statusFile).products | Where-Object { $_.key -eq 'core' }).forks[0]
+    Check 'a fetch without a merge leaves the base' ($f.base -eq $c2 -and $f.behind -eq 2) ($f | ConvertTo-Json)
+    GitIn $wApp @('merge', '-q', '--ff-only', 'FETCH_HEAD') | Out-Null
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    $f = ((Read-Json $statusFile).products | Where-Object { $_.key -eq 'core' }).forks[0]
+    Check 'merging moves the base to the product head' ($f.base -eq $c4 -and $f.behind -eq 0 -and @($f.changed).Count -eq 0) ($f | ConvertTo-Json)
+
+    # a repo that shares no history
+    $wNew = "$ws\clients\widgetco\w-new"
+    RunExe 'git' @('init', '-q', $wNew) $tmp | Out-Null
+    Commit $wNew 'own.txt' | Out-Null
+    $widgetC = With $widget @{ basedOn = @('base', 'core'); repos = @($fork, @{ remote = $src2; dir = 'w-new'; from = @{ product = 'core'; repo = 'app' } }) }
+    Write-Registry @($acmeB, $widgetC, $betaC, $gamma) -Products @($prod, $core)
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor warns about a fork with no shared commit' ($d.Out -match "WARN\s+\[widgetco\] repo 'w-new' is registered as a fork of 'app', but shares no commit") $d.Out
+    $g = Guard $wApp $wHome
+    Check 'guard: the note says a fork shares no commit' ($g.Out -match 'w-new is registered as a fork of core/app, but shares no commit') $g.Out
+
+    # a fork must come from a repo clients read in full
+    $coreSub = With $core @{ clientRead = @('app/sub') }
+    Write-Registry @($acmeB, $widgetC, $betaC, $gamma) -Products @($prod, $coreSub)
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor fails a fork of a repo not readable in full' ($d.Code -eq 1 -and $d.Out -match "FAIL\s+\[widgetco\] repo 'w-app' is a fork of 'core/app', but clientRead doesn't cover all of that repo") $d.Out
+    $r = Run 'Sync-Dossier.ps1'
+    Check 'status for such a fork says the repo isn''t readable' ($r.Out -match 'plan\s+write .*widgetco\\dossier\.products\.json')
+
+    # an enterprise client's repos are never read from inside a session
+    $acmeC = With $acmeB @{ basedOn = @('base', 'core') }
+    Write-Registry @($acmeC, $widgetC, $betaC, $gamma) -Products @($prod, $core)
+    $env:CLAUDECODE = '1'
+    $r = Run 'Sync-Dossier.ps1'
+    Remove-Item Env:\CLAUDECODE
+    Check 'sync skips an enterprise client''s status inside a session' ($r.Out -match "skip\s+product status for 'acme'") $r.Out
+
+    # dropping basedOn removes the status file and the skill
+    Write-Registry @($acmeB, $widget, $betaC, $gamma) -Products @($prod, $core)
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    Check 'no basedOn: status file and skill removed' (-not (Test-Path $statusFile) -and -not (Test-Path "$wHome\skills\dossier-product"))
 } finally {
     if ($substDrive) { subst "${substDrive}:" /d 2>$null | Out-Null }
     foreach ($v in $saveVars) { [Environment]::SetEnvironmentVariable($v, $saved[$v]) }
