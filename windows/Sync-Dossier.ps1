@@ -9,8 +9,10 @@
 #     hook for Bash and PowerShell, Read/Edit deny rules for what it must not see
 #     (Get-DsrDeniedPaths), and additionalDirectories (Get-DsrReadableRoots). A client based on a
 #     product gets Read denied on everything in the product outside clientRead, listed from
-#     disk, so rerun Sync after a product's folders change. Only rules this script added before
-#     (tracked in <home>\dossier.managed.json) are ever removed.
+#     disk, so rerun Sync after a product's folders change. Also the registry's shared
+#     permissions.allow and permissions.ask rules, unless the entry sets sharedPermissions: false.
+#     Only rules this script added before (tracked in <home>\dossier.managed.json) are ever
+#     removed; a shared rule the home already had stays the user's.
 #   - its home's CLAUDE.md is the personal rules file, if the registry names one. A CLAUDE.md
 #     this script didn't write is left alone and reported.
 #   - client and product homes link the registry's sharedSkills from ~/.claude\skills, and
@@ -170,14 +172,16 @@ function Sync-Settings($Entry) {
     if (Test-Path -LiteralPath $file) { $s = [IO.File]::ReadAllText($file) | ConvertFrom-Json -AsHashtable }
     if ($null -eq $s) { $s = [ordered]@{} }
     $before = $s | ConvertTo-Json -Depth 32
-    $old = @{ deny = @(); additionalDirectories = @() }
+    $old = @{ deny = @(); additionalDirectories = @(); allow = @(); ask = @() }
     if (Test-Path -LiteralPath $managedFile) {
         $m = [IO.File]::ReadAllText($managedFile) | ConvertFrom-Json -AsHashtable
-        if ($m) { $old.deny = @($m.deny | Where-Object { $_ }); $old.additionalDirectories = @($m.additionalDirectories | Where-Object { $_ }) }
+        if ($m) { foreach ($k in @($old.Keys)) { $old[$k] = @($m[$k] | Where-Object { $_ }) } }
     }
 
     $deny = @(Get-DsrDenyRules $reg $Entry)
     $dirs = @(Get-DsrReadableRoots $reg $Entry | ForEach-Object { $_.Replace('\', '/') })
+    $allow = @(); $ask = @()
+    if ($Entry.SharedPermissions) { $allow = @($reg.Permissions.Allow); $ask = @($reg.Permissions.Ask) }
 
     # The lead agent runs as the home's main session through the 'agent' setting. Only an
     # 'agent' value this script set is ever removed.
@@ -187,9 +191,12 @@ function Sync-Settings($Entry) {
     elseif ($oldAgent -and $s.Contains('agent') -and $s.agent -eq $oldAgent) { $s.Remove('agent') }
 
     if (-not $s.Contains('permissions') -or $null -eq $s.permissions) { $s.permissions = [ordered]@{} }
-    foreach ($pair in @(@('deny', $deny), @('additionalDirectories', $dirs))) {
+    $claimed = @{}
+    foreach ($pair in @(@('deny', $deny), @('additionalDirectories', $dirs), @('allow', $allow), @('ask', $ask))) {
         $name = $pair[0]; $want = @($pair[1])
         $cur = @(); if ($s.permissions.Contains($name)) { $cur = @($s.permissions[$name] | Where-Object { $null -ne $_ }) }
+        # A shared rule the home already had by hand stays the user's, so Sync never removes it.
+        $claimed[$name] = @($want | Where-Object { $_ -in $old[$name] -or $_ -notin $cur })
         $kept = @($cur | Where-Object { $_ -notin $old[$name] -or $_ -in $want })
         $next = @($kept) + @($want | Where-Object { $_ -notin $kept })
         if ($next.Count) { $s.permissions[$name] = $next } elseif ($s.permissions.Contains($name)) { $s.permissions.Remove($name) }
@@ -213,11 +220,12 @@ function Sync-Settings($Entry) {
 
     $after = $s | ConvertTo-Json -Depth 32
     $m = [ordered]@{ deny = $deny; additionalDirectories = $dirs }
+    foreach ($k in 'allow', 'ask') { if ($claimed[$k].Count) { $m[$k] = $claimed[$k] } }
     if ($lead) { $m.agent = $lead }
     $managed = $m | ConvertTo-Json -Depth 4
     $managedNow = if (Test-Path -LiteralPath $managedFile) { [IO.File]::ReadAllText($managedFile) } else { '' }
     if ($after -ne $before -or $managed -ne $managedNow) {
-        $what = "update $file ($($deny.Count) deny rules, $($dirs.Count) additional dirs, guard hooks$(if ($lead) { ", main agent $lead" }))"
+        $what = "update $file ($($deny.Count) deny rules, $($dirs.Count) additional dirs, $(if ($allow.Count -or $ask.Count) { "$($allow.Count) allow and $($ask.Count) ask rules, " })guard hooks$(if ($lead) { ", main agent $lead" }))"
         Step $what { Write-TextFile $file $after; Write-TextFile $managedFile $managed }
     }
 }

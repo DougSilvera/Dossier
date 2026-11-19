@@ -4,13 +4,14 @@
 #
 # FAIL  a home logged in to the wrong account; a home that links into another home; a CLAUDE.md
 #       above a client or product root (it would load into every session there); missing deny
-#       rules (including product folders added since the last Sync) or guard hooks; an
-#       enterprise root readable from the firm home; one entry's memory or transcripts stored in
-#       another entry's home; a client repo forked from a product repo clients can't read in full.
-# WARN  a home not logged in yet; folders under the workspace in no registered root; an
-#       enterprise client based on a product that doesn't allow enterprise reads; registered
-#       repos not cloned yet; a based-on client with no product status; a fork that shares no
-#       commit with its product repo; leftover claude-multi-account-kit wiring.
+#       rules (including product folders added since the last Sync), shared ask rules or guard
+#       hooks; an enterprise root readable from the firm home; one entry's memory or transcripts
+#       stored in another entry's home; a client repo forked from a product repo clients can't
+#       read in full.
+# WARN  a home not logged in yet; missing shared allow rules; folders under the workspace in no
+#       registered root; an enterprise client based on a product that doesn't allow enterprise
+#       reads; registered repos not cloned yet; a based-on client with no product status; a fork
+#       that shares no commit with its product repo; leftover claude-multi-account-kit wiring.
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\Dossier.Common.ps1"
@@ -54,6 +55,15 @@ foreach ($e in $reg.Entries) {
         $hint = if ($changed.Count) { " (product $($changed -join ', ') changed on disk since the last Sync; clients can read the new items until Sync-Dossier -Apply)" } else { '' }
         Report 'FAIL' "$tag missing deny rules: $($missing -join ', ')$hint"
     } else { Report 'ok' "$tag deny rules in place" }
+    if ($e.SharedPermissions -and ($reg.Permissions.Allow.Count -or $reg.Permissions.Ask.Count)) {
+        $ask = @(); if ($s -and $s.permissions -and $s.permissions.ask) { $ask = @($s.permissions.ask) }
+        $allow = @(); if ($s -and $s.permissions -and $s.permissions.allow) { $allow = @($s.permissions.allow) }
+        $missingAsk = @($reg.Permissions.Ask | Where-Object { $_ -notin $ask })
+        $missingAllow = @($reg.Permissions.Allow | Where-Object { $_ -notin $allow })
+        if ($missingAsk.Count) { Report 'FAIL' "$tag missing shared ask rules: $($missingAsk -join ', ') (these run without asking until Sync-Dossier -Apply)" }
+        if ($missingAllow.Count) { Report 'WARN' "$tag missing shared allow rules: $($missingAllow -join ', ') (Sync-Dossier -Apply)" }
+        if (-not $missingAsk.Count -and -not $missingAllow.Count) { Report 'ok' "$tag shared allow and ask rules in place" }
+    }
     if (-not (Test-DsrHooked $s 'SessionStart' 'dossier-guard.ps1')) { Report 'FAIL' "$tag guard hook not wired in $settingsFile" }
     if (-not (Test-DsrHooked $s 'PreToolUse' 'dossier-shellguard.ps1')) { Report 'FAIL' "$tag shell guard hook not wired in $settingsFile" }
 

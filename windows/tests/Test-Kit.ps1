@@ -19,7 +19,7 @@ $env:DOSSIER_CONFIG = Join-Path $tmp '.dossier.json'
 $ws = Join-Path $tmp 'workspace'
 $substDrive = $null
 
-function Write-Registry($Clients, [string] $Personal = '~/.dossier/personal.md', [string[]] $Shared = @(), $Products = @(), $Agents = $null) {
+function Write-Registry($Clients, [string] $Personal = '~/.dossier/personal.md', [string[]] $Shared = @(), $Products = @(), $Agents = $null, $Permissions = $null) {
     $r = [ordered]@{
         workspaceRoot = '~/workspace'; personalRules = $Personal; sharedSkills = $Shared
         firm = [ordered]@{ hubRoot = '~/workspace/hub'; sandboxRoot = '~/workspace/sandbox'; expectEmail = 'me@firm.test' }
@@ -27,6 +27,7 @@ function Write-Registry($Clients, [string] $Personal = '~/.dossier/personal.md',
         products = @($Products)
     }
     if ($Agents) { $r.agents = $Agents }
+    if ($Permissions) { $r.permissions = $Permissions }
     [IO.File]::WriteAllText($env:DOSSIER_CONFIG, ($r | ConvertTo-Json -Depth 8))
 }
 $acme = [ordered]@{ key = 'acme'; name = 'Acme'; root = '~/workspace/clients/acme'; seat = 'enterprise'; expectEmail = 'me@acme.test'; formerRoots = @('~/workspace/acme-old') }
@@ -82,7 +83,8 @@ try {
         @{ n = 'uppercase key'; c = @(Client @{ key = 'X' }) },
         @{ n = 'key with trailing newline'; c = @(Client @{ key = "x`n" }) },
         @{ n = 'formerRoots covering another root'; c = @($widget, (Client @{ formerRoots = @('~/workspace/clients') })) },
-        @{ n = 'formerRoots covering the workspace'; c = @(Client @{ formerRoots = @('~') }) }
+        @{ n = 'formerRoots covering the workspace'; c = @(Client @{ formerRoots = @('~') }) },
+        @{ n = 'sharedPermissions that is not true or false'; c = @(Client @{ sharedPermissions = 'no' }) }
     )
     foreach ($b in $bad) {
         Write-Registry $b.c
@@ -93,6 +95,9 @@ try {
     $threw = $false; try { Read-DsrRegistry | Out-Null } catch { $threw = $true }
     Check 'registry rejects a relative DOSSIER_CONFIG' $threw
     $env:DOSSIER_CONFIG = Join-Path $tmp '.dossier.json'
+    Write-Registry @($widget) -Permissions @{ deny = @('Bash(curl:*)') }
+    $threw = $false; try { Read-DsrRegistry | Out-Null } catch { $threw = $true }
+    Check 'registry rejects shared permissions other than allow and ask' $threw
 
     Write-Registry @($acme, $widget)
     $reg = Read-DsrRegistry
@@ -157,6 +162,45 @@ try {
     Check 'each settings rewrite keeps a backup' (@(Get-ChildItem "$tmp\.claude" -Filter 'settings.json.*.bak').Count -ge 2)
     Write-Registry @($acme, $widget)
     Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+
+    # --- shared allow and ask rules: merged like deny, skipped where an entry opts out
+    $fz = Read-Json "$tmp\.claude\settings.json"
+    $fz.permissions.allow = @('Bash'); $fz.permissions.ask = @('Bash(hand:*)')
+    [IO.File]::WriteAllText("$tmp\.claude\settings.json", ($fz | ConvertTo-Json -Depth 32))
+    $acmeOut = [ordered]@{}; foreach ($k in $acme.Keys) { $acmeOut[$k] = $acme[$k] }; $acmeOut.sharedPermissions = $false
+    $shared = [ordered]@{ allow = @('Bash', 'PowerShell'); ask = @('Bash(rm:*)', 'PowerShell(git clean:*)') }
+    Write-Registry @($acmeOut, $widget) -Permissions $shared
+    $r = Run 'Sync-Dossier.ps1' @('-Apply')
+    Check 'sync with shared permissions exits 0' ($r.Code -eq 0) "$($r.Out) $($r.Err)"
+    $wz = Read-Json "$tmp\.claude-homes\widgetco\settings.json"
+    Check 'shared allow and ask reach an included home' ((@($wz.permissions.allow) -join ',') -eq 'Bash,PowerShell' -and (@($wz.permissions.ask) -join ',') -eq 'Bash(rm:*),PowerShell(git clean:*)') ($wz.permissions | ConvertTo-Json)
+    $ac = Read-Json "$tmp\.claude-homes\acme\settings.json"
+    Check 'an entry with sharedPermissions false gets none' (-not $ac.permissions.Contains('allow') -and -not $ac.permissions.Contains('ask'))
+    $fz = Read-Json "$tmp\.claude\settings.json"
+    Check 'a shared rule the home already had is not duplicated' ((@($fz.permissions.allow) -join ',') -eq 'Bash,PowerShell') (@($fz.permissions.allow) -join ',')
+    Check 'hand-added ask rule survives' ('Bash(hand:*)' -in $fz.permissions.ask -and 'Bash(rm:*)' -in $fz.permissions.ask)
+    Check 'only rules Sync added are tracked' ((@((Read-Json "$tmp\.claude\dossier.managed.json").allow) -join ',') -eq 'PowerShell')
+    $r = Run 'Sync-Dossier.ps1' @('-Apply')
+    Check 'sync with shared permissions is idempotent' ($r.Out -match 'In sync\.') $r.Out
+
+    $wz.permissions.allow = @($wz.permissions.allow) + 'Read(mine)'
+    [IO.File]::WriteAllText("$tmp\.claude-homes\widgetco\settings.json", ($wz | ConvertTo-Json -Depth 32))
+    Write-Registry @($acmeOut, $widget) -Permissions ([ordered]@{ allow = @('PowerShell'); ask = @('Bash(rm:*)') })
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    $wz = Read-Json "$tmp\.claude-homes\widgetco\settings.json"
+    Check 'a rule dropped from the registry goes where Sync added it' ('Bash' -notin $wz.permissions.allow -and 'PowerShell(git clean:*)' -notin $wz.permissions.ask)
+    Check 'hand-added allow rule survives a registry change' ('Read(mine)' -in $wz.permissions.allow -and 'PowerShell' -in $wz.permissions.allow)
+    $fz = Read-Json "$tmp\.claude\settings.json"
+    Check 'a dropped rule the home had by hand stays' ('Bash' -in $fz.permissions.allow -and 'PowerShell' -in $fz.permissions.allow)
+
+    Write-Registry @($acme, $widget)
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    $fz = Read-Json "$tmp\.claude\settings.json"; $wz = Read-Json "$tmp\.claude-homes\widgetco\settings.json"
+    Check 'removing shared permissions keeps only hand-added rules' ((@($fz.permissions.allow) -join ',') -eq 'Bash' -and (@($fz.permissions.ask) -join ',') -eq 'Bash(hand:*)' -and (@($wz.permissions.allow) -join ',') -eq 'Read(mine)' -and -not $wz.permissions.Contains('ask')) "$(@($fz.permissions.allow) -join ',') | $(@($fz.permissions.ask) -join ',') | $(@($wz.permissions.allow) -join ',')"
+    $fz.permissions.Remove('allow'); $fz.permissions.Remove('ask')
+    [IO.File]::WriteAllText("$tmp\.claude\settings.json", ($fz | ConvertTo-Json -Depth 32))
+    $wz.permissions.Remove('allow')
+    [IO.File]::WriteAllText("$tmp\.claude-homes\widgetco\settings.json", ($wz | ConvertTo-Json -Depth 32))
 
     # --- sync survives empty and null settings
     foreach ($case in @('', '{"permissions":null,"hooks":null}')) {
@@ -396,6 +440,27 @@ try {
     $d = Run 'Test-Dossier.ps1'
     Check 'doctor finds a missing shell guard hook' ($d.Code -eq 1 -and $d.Out -match 'shell guard hook not wired')
     [IO.File]::WriteAllText("$tmp\.claude\settings.json", $orig)
+
+    Write-Registry @($acmeOut, $widget) -Permissions $shared
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor passes a home with every shared rule' ($d.Code -eq 0 -and $d.Out -match 'ok\s+\[widgetco\] shared allow and ask rules in place') $d.Out
+    Check 'doctor skips shared rules for an opted-out home' ($d.Out -notmatch '\[acme\] (missing )?shared') $d.Out
+    $wzFile = "$tmp\.claude-homes\widgetco\settings.json"
+    $s = Read-Json $wzFile; $orig = $s | ConvertTo-Json -Depth 32
+    $s.permissions.ask = @($s.permissions.ask | Where-Object { $_ -ne 'Bash(rm:*)' })
+    [IO.File]::WriteAllText($wzFile, ($s | ConvertTo-Json -Depth 32))
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor fails a home missing a shared ask rule' ($d.Code -eq 1 -and $d.Out -match 'FAIL\s+\[widgetco\] missing shared ask rules: Bash\(rm:\*\)') $d.Out
+    [IO.File]::WriteAllText($wzFile, $orig)
+    $s = Read-Json $wzFile
+    $s.permissions.allow = @($s.permissions.allow | Where-Object { $_ -ne 'PowerShell' })
+    [IO.File]::WriteAllText($wzFile, ($s | ConvertTo-Json -Depth 32))
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor warns about a home missing a shared allow rule' ($d.Out -match 'WARN\s+\[widgetco\] missing shared allow rules: PowerShell' -and $d.Out -notmatch '\[widgetco\] missing shared ask') $d.Out
+    [IO.File]::WriteAllText($wzFile, $orig)
+    Write-Registry @($acme, $widget)
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
 
     # --- doctor: a key that prefixes another key (acme / acme-labs) is not a leak
     $labs = [ordered]@{ key = 'acme-labs'; root = '~/workspace/clients/acme-labs'; seat = 'none'; expectEmail = 'me@firm.test' }

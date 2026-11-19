@@ -49,6 +49,7 @@ Fill in each client's rules in `~/workspace/clients/<client>/CLAUDE.md`, which S
 | Pull new folders into a product clients read | Rerun `Sync-Dossier -Apply`: the rules that hide everything outside `clientRead` are listed from disk, and the doctor fails until they're current. |
 | Clone a client's or product's repos | List them in the entry's `repos`, then `Import-Dossier -Key <key> -Apply` (dry run without `-Apply`). For an enterprise-seat client, run it from your own terminal. |
 | Change personal rules | Edit the `personalRules` file, then run `Sync-Dossier -Apply`. Never edit a home's `CLAUDE.md` directly. |
+| Share allow and ask rules across homes | Add `"permissions": { "allow": [...], "ask": [...] }` to the registry, then `Sync-Dossier -Apply`. Every home gets them, except an entry with `"sharedPermissions": false`. A rule a home already had stays its own; Sync removes only rules it added. |
 | Add an MCP server for one client | Inside that client's session: `claude mcp add --scope user ...` |
 | Move existing repos into a client root | Close every session, IDE and terminal using them, then move with `[IO.Directory]::Move` from your own terminal. See DESIGN.md, "Lessons". |
 

@@ -206,6 +206,19 @@ function Read-DsrRegistry {
         }
         return $list
     }
+    function Read-SharedPermissions($Raw, [string] $What) {
+        $v = $Raw.sharedPermissions
+        if ($null -eq $v) { return $true }
+        if ($v -isnot [bool]) { throw "$What sharedPermissions must be true or false" }
+        return $v
+    }
+    $perms = [pscustomobject]@{ Allow = @(); Ask = @() }
+    if ($null -ne $raw.permissions) {
+        foreach ($prop in $raw.permissions.PSObject.Properties) {
+            if ($prop.Name -cnotin @('allow', 'ask')) { throw "permissions.$($prop.Name) is not shared by Sync; only allow and ask are" }
+            $perms.($prop.Name) = @(@($prop.Value) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        }
+    }
 
     if ($null -ne $raw.PSObject.Properties['templates']) { throw "$path has a 'templates' section; templates are now 'products', each with its own home and a clientRead list" }
 
@@ -214,7 +227,7 @@ function Read-DsrRegistry {
         Home = (Get-DsrDefaultHome); Roots = $firmRoots; FormerRoots = @(); HubRoot = $hub
         ExpectEmail = [string]$f.expectEmail; ExpectOrg = [string]$f.expectOrg
         Contacts = @(); Status = 'active'; BasedOn = @(); Repos = @(); ClientRead = @(); EnterpriseRead = $false
-        AgentRoles = (Read-AgentRoles $f 'firm' 'firm')
+        AgentRoles = (Read-AgentRoles $f 'firm' 'firm'); SharedPermissions = (Read-SharedPermissions $f 'firm')
     })
 
     foreach ($p in @($raw.products)) {
@@ -243,7 +256,7 @@ function Read-DsrRegistry {
             Contacts = @(@($p.contacts) | Where-Object { $_ }); Status = [string]($p.status ?? 'active')
             BasedOn = @(); Repos = @(Read-DsrRepos $p.repos "product '$key'")
             ClientRead = $clientRead; EnterpriseRead = [bool]$p.enterpriseRead
-            AgentRoles = (Read-AgentRoles $p 'product' "product '$key'")
+            AgentRoles = (Read-AgentRoles $p 'product' "product '$key'"); SharedPermissions = (Read-SharedPermissions $p "product '$key'")
         })
     }
 
@@ -270,7 +283,7 @@ function Read-DsrRegistry {
             ExpectEmail = [string]$c.expectEmail; ExpectOrg = [string]$c.expectOrg
             Contacts = @(@($c.contacts) | Where-Object { $_ }); Status = [string]($c.status ?? 'active')
             BasedOn = $basedOn; Repos = @(Read-DsrRepos $c.repos "client '$key'"); ClientRead = @(); EnterpriseRead = $false
-            AgentRoles = (Read-AgentRoles $c 'client' "client '$key'")
+            AgentRoles = (Read-AgentRoles $c 'client' "client '$key'"); SharedPermissions = (Read-SharedPermissions $c "client '$key'")
         })
     }
 
@@ -311,6 +324,7 @@ function Read-DsrRegistry {
         PersonalRules = if ($raw.personalRules) { Resolve-DsrRegistryPath ([string]$raw.personalRules) 'personalRules' } else { $null }
         SharedSkills  = @(@($raw.sharedSkills) | Where-Object { $_ } | ForEach-Object { [string]$_ })
         Agents        = $agents
+        Permissions   = $perms
         Entries       = $entries.ToArray()
     }
 }
