@@ -761,13 +761,29 @@ try {
         @{ n = 'one agent in two roles'; a = [ordered]@{ source = '~/.dossier/agents'; roles = [ordered]@{ builder = 'bob'; reviewer = 'bob' } }; c = $clients },
         @{ n = 'an agent name with a colon'; a = [ordered]@{ source = '~/.dossier/agents'; roles = @{ builder = 'x:y' } }; c = $clients },
         @{ n = 'agents with no source'; a = [ordered]@{ roles = @{ builder = 'bob' } }; c = $clients },
-        @{ n = 'hr in a client home'; a = $team; c = @(With $widget @{ agentRoles = @('builder', 'hr') }) }
+        @{ n = 'hr in a client home'; a = $team; c = @(With $widget @{ agentRoles = @('builder', 'hr') }) },
+        @{ n = 'agentNames on a no-seat client'; a = $team; c = @(With $widget @{ agentNames = @{ lead = 'shep' } }) },
+        @{ n = 'agentNames on a product'; a = $team; c = $clients; p = @($prod, (With $core @{ agentNames = @{ lead = 'shep' } })) },
+        @{ n = 'agentNames with hr'; a = $team; c = @(With $acmeB @{ agentNames = @{ hr = 'shep' } }) },
+        @{ n = 'agentNames with an unknown role'; a = $team; c = @(With $acmeB @{ agentNames = @{ janitor = 'shep' } }) },
+        @{ n = 'agentNames with a bad name'; a = $team; c = @(With $acmeB @{ agentNames = @{ lead = 'x:y' } }) },
+        @{ n = 'agentNames that aren''t a map'; a = $team; c = @(With $acmeB @{ agentNames = @('shep') }) },
+        @{ n = 'agentNames using the roster''s agent for another role'; a = $team; c = @(With $acmeB @{ agentNames = @{ lead = 'bob' } }) },
+        @{ n = 'agentNames with one agent in two roles'; a = $team; c = @(With $acmeB @{ agentNames = [ordered]@{ lead = 'shep'; ops = 'shep' } }) }
     )
     foreach ($b in $badAgents) {
-        Write-Registry $b.c -Products @($prod, $core) -Agents $b.a
+        Write-Registry $b.c -Products ($b.p ?? @($prod, $core)) -Agents $b.a
         $threw = $false; try { Read-DsrRegistry | Out-Null } catch { $threw = $true }
         Check "registry rejects $($b.n)" $threw
     }
+    Write-Registry $clients -Products @($prod, $core) -Agents $team
+    $raw = Get-Content -Raw $env:DOSSIER_CONFIG | ConvertFrom-Json -AsHashtable; $raw.firm.agentNames = @{ lead = 'shep' }
+    [IO.File]::WriteAllText($env:DOSSIER_CONFIG, ($raw | ConvertTo-Json -Depth 8))
+    $threw = $false; try { Read-DsrRegistry | Out-Null } catch { $threw = $true }
+    Check 'registry rejects agentNames on the firm' $threw
+    Write-Registry @(With $acmeB @{ agentNames = @{ builder = 'bob' } }) -Products @($prod, $core) -Agents $team
+    $threw = $false; try { Read-DsrRegistry | Out-Null } catch { $threw = $true }
+    Check 'registry accepts agentNames naming the roster''s own agent for that role' (-not $threw)
 
     # homes that already hold agent files: Dossier's own copies are replaced by the link, anything else stops it
     $coreHome = "$tmp\.claude-homes\core"; $gHome = "$tmp\.claude-homes\gamma"
@@ -827,6 +843,25 @@ try {
     Check 'a hand-made agent file is left alone, and linked homes see it' ((Test-Path "$fHome\agents\mine.md") -and (Test-Path "$wHome\agents\mine.md"))
     Check 'dropping the lead clears the setting Sync made' (-not (Read-Json "$fHome\settings.json").Contains('agent') -and -not (Read-Json "$tmp\.claude-homes\beta\settings.json").Contains('agent'))
     Check 'a main agent the user set is left alone' ((Read-Json "$wHome\settings.json").agent -eq 'mine')
+
+    # an enterprise entry's own lead: its home gets that agent, the firm keeps the roster's
+    Agent 'shep'; Agent 'otto'
+    $acmeOwn = With $acmeB @{ agentRoles = @('lead', 'builder', 'ops'); agentNames = [ordered]@{ lead = 'shep'; ops = 'otto' } }
+    Write-Registry @($acmeOwn, $widget, $betaOne, $gamma) -Products @($prod, $core) -Agents $team
+    $r = Run 'Sync-Dossier.ps1' @('-Apply')
+    Check 'sync with agentNames exits 0' ($r.Code -eq 0) "$($r.Out) $($r.Err)"
+    Check 'an enterprise home gets its named lead, not the roster''s' ((Test-Path "$aHome\agents\shep.md") -and -not (Test-Path "$aHome\agents\chief.md") -and (Test-Path "$aHome\agents\bob.md"))
+    Check 'the named lead is installed with the lead contract' ((Get-Content -Raw "$aHome\agents\shep.md") -match '(?s)\A---\nname: shep.*## Role: lead')
+    Check 'a role the roster leaves empty can be filled by agentNames' (Test-Path "$aHome\agents\otto.md")
+    Check 'the enterprise main session runs as its named lead' ((Read-Json "$aHome\settings.json").agent -eq 'shep' -and (Read-Json "$aHome\dossier.managed.json").agent -eq 'shep')
+    Check 'the firm keeps the roster''s lead' ((Read-Json "$fHome\settings.json").agent -eq 'chief' -and (Test-Path "$fHome\agents\chief.md") -and -not (Test-Path "$fHome\agents\shep.md") -and -not (Test-Path "$fHome\agents\otto.md"))
+    $r = Run 'Sync-Dossier.ps1' @('-Apply')
+    Check 'sync with agentNames is idempotent' ($r.Out -match 'In sync\.') $r.Out
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor lists the enterprise home''s own agents' ($d.Out -match 'ok\s+\[acme\] agents: shep \(lead\), bob \(builder\), otto \(ops\)' -and $d.Out -notmatch '\[acme\] main session should run') $d.Out
+    Write-Registry @((With $acmeB @{ agentNames = [ordered]@{ lead = 'shep'; ops = 'otto' } }), $widget, $betaOne, $gamma) -Products @($prod, $core) -Agents $team
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    Check 'agentNames alone doesn''t bring the lead' (-not (Test-Path "$aHome\agents\shep.md") -and -not (Read-Json "$aHome\settings.json").Contains('agent') -and (Test-Path "$aHome\agents\otto.md") -and (Test-Path "$aHome\agents\rae.md"))
 
     # no agents in the registry: Dossier's links go
     Write-Registry @($acmeB, $widget, $betaOne, $gamma) -Products @($prod, $core)

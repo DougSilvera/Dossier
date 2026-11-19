@@ -206,6 +206,22 @@ function Read-DsrRegistry {
         }
         return $list
     }
+    function Read-AgentNames($Raw, [string] $Kind, [string] $Seat, [string] $What) {
+        if ($null -eq $Raw.agentNames) { return $null }
+        if ($Kind -ne 'client' -or $Seat -ne 'enterprise') { throw "$What agentNames needs an enterprise-seat client: other homes link to the firm's agents, so they can't have agents of their own" }
+        if ($Raw.agentNames -isnot [System.Management.Automation.PSCustomObject]) { throw "$What agentNames must map roles to agent names" }
+        $names = [ordered]@{}
+        foreach ($prop in $Raw.agentNames.PSObject.Properties) {
+            $role = $prop.Name; $n = [string]$prop.Value
+            if ($role -cnotin $script:DsrRoles) { throw "$What agentNames '$role' is not a role" }
+            if ($role -eq 'hr') { throw "$What agentNames can't include hr: hr edits your roster and lives only in the firm home" }
+            if ($n -cnotmatch '^[a-z0-9][a-z0-9-]*\z') { throw "$What agentNames.$role '$n' must be an agent name: lowercase letters, digits and -" }
+            if ($agents) { foreach ($k in $agents.Roles.Keys) { if ($k -ne $role -and $agents.Roles[$k] -eq $n) { throw "$What agentNames.$role '$n' is the roster's $k; give each role its own agent" } } }
+            if ($n -in @($names.Values)) { throw "$What agentNames: agent '$n' fills two roles; give each role its own agent" }
+            $names[$role] = $n
+        }
+        return $names
+    }
     function Read-SharedPermissions($Raw, [string] $What) {
         $v = $Raw.sharedPermissions
         if ($null -eq $v) { return $true }
@@ -227,7 +243,7 @@ function Read-DsrRegistry {
         Home = (Get-DsrDefaultHome); Roots = $firmRoots; FormerRoots = @(); HubRoot = $hub
         ExpectEmail = [string]$f.expectEmail; ExpectOrg = [string]$f.expectOrg
         Contacts = @(); Status = 'active'; BasedOn = @(); Repos = @(); ClientRead = @(); EnterpriseRead = $false
-        AgentRoles = (Read-AgentRoles $f 'firm' 'firm'); SharedPermissions = (Read-SharedPermissions $f 'firm')
+        AgentRoles = (Read-AgentRoles $f 'firm' 'firm'); AgentNames = (Read-AgentNames $f 'firm' 'firm' 'firm'); SharedPermissions = (Read-SharedPermissions $f 'firm')
     })
 
     foreach ($p in @($raw.products)) {
@@ -256,7 +272,7 @@ function Read-DsrRegistry {
             Contacts = @(@($p.contacts) | Where-Object { $_ }); Status = [string]($p.status ?? 'active')
             BasedOn = @(); Repos = @(Read-DsrRepos $p.repos "product '$key'")
             ClientRead = $clientRead; EnterpriseRead = [bool]$p.enterpriseRead
-            AgentRoles = (Read-AgentRoles $p 'product' "product '$key'"); SharedPermissions = (Read-SharedPermissions $p "product '$key'")
+            AgentRoles = (Read-AgentRoles $p 'product' "product '$key'"); AgentNames = (Read-AgentNames $p 'product' 'firm' "product '$key'"); SharedPermissions = (Read-SharedPermissions $p "product '$key'")
         })
     }
 
@@ -283,7 +299,7 @@ function Read-DsrRegistry {
             ExpectEmail = [string]$c.expectEmail; ExpectOrg = [string]$c.expectOrg
             Contacts = @(@($c.contacts) | Where-Object { $_ }); Status = [string]($c.status ?? 'active')
             BasedOn = $basedOn; Repos = @(Read-DsrRepos $c.repos "client '$key'"); ClientRead = @(); EnterpriseRead = $false
-            AgentRoles = (Read-AgentRoles $c 'client' "client '$key'"); SharedPermissions = (Read-SharedPermissions $c "client '$key'")
+            AgentRoles = (Read-AgentRoles $c 'client' "client '$key'"); AgentNames = (Read-AgentNames $c 'client' ([string]$c.seat) "client '$key'"); SharedPermissions = (Read-SharedPermissions $c "client '$key'")
         })
     }
 
@@ -334,14 +350,16 @@ function Get-DsrEntryAgents($Reg, $Entry) {
     # role the roster fills; other homes get all but lead (it replaces the main session's
     # prompt, so it is opt-in) and hr (it edits the roster, so it stays in the firm home).
     # Homes that share the firm's agents see all of them through the link; for those this
-    # list only decides the lead.
+    # list only decides the lead. An enterprise entry's agentNames puts its own agent in a role.
     if (-not $Reg.Agents) { return @() }
+    $names = $Entry.AgentNames
+    $filled = @($Reg.Agents.Roles.Keys) + @(if ($null -ne $names) { $names.Keys })
     $want = if ($null -ne $Entry.AgentRoles) { $Entry.AgentRoles }
-            elseif ($Entry.Kind -eq 'firm') { @($Reg.Agents.Roles.Keys) }
-            else { @($Reg.Agents.Roles.Keys | Where-Object { $_ -notin @('lead', 'hr') }) }
+            elseif ($Entry.Kind -eq 'firm') { $filled }
+            else { @($filled | Where-Object { $_ -notin @('lead', 'hr') }) }
     return @(foreach ($role in $script:DsrRoles) {
-        if ($role -notin $want -or -not $Reg.Agents.Roles.Contains($role)) { continue }
-        $name = $Reg.Agents.Roles[$role]
+        if ($role -notin $want -or $role -notin $filled) { continue }
+        $name = if ($null -ne $names -and $names.Contains($role)) { $names[$role] } else { $Reg.Agents.Roles[$role] }
         [pscustomobject]@{ Role = $role; Name = $name; Source = (Join-Path $Reg.Agents.Source "$name.md") }
     })
 }
