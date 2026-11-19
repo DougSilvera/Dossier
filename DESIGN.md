@@ -1,6 +1,6 @@
 # Dossier
 
-Status: in use since 2026-11. 239 tests in `windows/tests/Test-Kit.ps1`.
+Status: in use since 2026-11. 244 tests in `windows/tests/Test-Kit.ps1`.
 
 ## Problem
 
@@ -69,10 +69,11 @@ Dossier defines a small team of **roles**. Each person brings their own **agents
 
 - **Roster:** a folder of Claude Code agent files, one per agent, ideally the person's own git repo. The registry's `agents` section names it and maps roles to agents: `"agents": { "source": "~/.dossier/agents", "roles": { "lead": "<name>", "builder": "<name>", ... } }`. An agent's file name and its frontmatter `name` must match the mapping.
 - **Role contracts:** Dossier ships one per role in `roles/`, plus `roles/_common.md` for every role (the three memory layers, boundaries, no commits or comments without the user's word). Sync installs each agent into a home as the roster's file followed by its role's contract and the common rules, after a marker. Agents load the session's `CLAUDE.md` files too, so personal and engagement rules apply to them.
-- **Which homes get which agents:** the firm home gets every role the roster fills. Product and client homes, enterprise seats included, get all but `lead` and `hr`. An entry's `agentRoles` narrows or widens that, but `hr` is accepted only on the firm: it edits the roster, and a client home must never write to it.
-- **Lead:** Sync sets the home's `agent` setting to the lead, so the main session runs as it. A custom agent's prompt likely replaces Claude Code's default system prompt, so the lead is opt-in outside the firm home. Sync removes only an `agent` value it set.
-- **Memory follows the home** (checked on Windows with Claude Code 2.1.328: an agent with `memory: user` in a home set by `CLAUDE_CONFIG_DIR` writes to `<home>/agent-memory/<name>/`). The same agent in two homes shares its definition but never its memory, so what it learns at an enterprise client stays in that client's home. The doctor warns about an agent without `memory: user`.
-- **Dispatch follows `cc`:** the lead hands work to teammates inside its own home, and to a no-seat client's home with `cc -a <key> --at-root -p`, where that home's copy of each agent uses that home's memory. An enterprise client's team is started by the user in that client's home; nothing dispatches into it.
+- **One team per account:** Sync installs every agent the roster fills into the firm home. Every other home on the firm's own account (products, no-seat clients) links its `agents` folder to the firm home's: one definition of each agent, no copies, and an edit there is live everywhere at once. Only an outside enterprise seat gets its own copies, Sync-maintained: all roles but `lead` and `hr` by default, or the entry's `agentRoles`. Sync replaces a linked home's old Dossier copies with the link, and leaves a home with agent files of its own unlinked, with a warning. The doctor accepts this one link into the firm home and flags a home that should have it.
+- **`hr`:** accepted in `agentRoles` only on the firm, since it edits the roster and a client home must never write to it. Linked homes can still see its definition, so its contract tells it to stop when its memory folder shows it isn't in the user's own home.
+- **Lead:** Sync sets the home's `agent` setting to the lead, so the main session runs as it. A custom agent's prompt likely replaces Claude Code's default system prompt, so the lead is opt-in outside the firm home (`agentRoles` with `lead`). Sync removes only an `agent` value it set.
+- **Memory follows the home** (checked on Windows with Claude Code 2.1.328: an agent with `memory: user` in a home set by `CLAUDE_CONFIG_DIR` writes to `<home>/agent-memory/<name>/`). Linked homes share definitions, not memory, so what an agent learns for one client stays in that client's home. The doctor warns about an agent without `memory: user`.
+- **Dispatch follows `cc`:** the lead hands work to teammates inside its own home, and to a no-seat client's home with `cc -a <key> --at-root -p`, where the same agents use that home's memory. An enterprise client's team is started by the user in that client's home; nothing dispatches into it.
 - **Memory layers:** an agent writes its own memory freely; it proposes engagement conventions (that root's `CLAUDE.md`) and personal rules, and waits for the user's OK.
 
 ## Data rule
@@ -149,7 +150,7 @@ Settings and `.mcp.json` are not inherited from parent folders, so client-wide M
 | `Import-Dossier.ps1` | Clones a registered client's or product's `repos` into its root after a Sync, then runs the doctor. Dry run unless `-Apply`. Never touches an existing folder. |
 | `dossier-guard.ps1` | SessionStart hook. Silent to the person when everything matches; gives a based-on client session a model-only product note. |
 | `dossier-shellguard.ps1` | PreToolUse hook for Bash and PowerShell. Denies commands that reach a path the home's `Read` deny rules cover, and writes to a path it may only read; silent otherwise. |
-| `tests/Test-Kit.ps1` | 239 checks against a throwaway `USERPROFILE` and a stub `claude`. |
+| `tests/Test-Kit.ps1` | 244 checks against a throwaway `USERPROFILE` and a stub `claude`. |
 
 Setting up a home: `Sync-Dossier -Apply`, then `cc -a <key>` and `/login` as the expected account, then `Test-Dossier`.
 

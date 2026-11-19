@@ -40,6 +40,7 @@ foreach ($e in $reg.Entries) {
     foreach ($i in @(Get-ChildItem -LiteralPath $e.Home -Force -ErrorAction SilentlyContinue)) {
         if (-not $i.LinkType) { continue }
         $t = [string]@($i.Target)[0]
+        if ((Test-DsrSharesFirmAgents $e) -and $i.Name -eq 'agents' -and (Test-DsrSamePath $t (Get-DsrFirmAgentsDir))) { continue }
         foreach ($h in $homes) { if ($h -ne $e.Home -and (Test-DsrUnder $t $h)) { Report 'FAIL' "$tag $($i.FullName) links into another home ($t)" } }
     }
 
@@ -58,7 +59,13 @@ foreach ($e in $reg.Entries) {
 
     $agents = @(Get-DsrEntryAgents $reg $e)
     $stale = @()
-    foreach ($a in $agents) {
+    if ($reg.Agents -and (Test-DsrSharesFirmAgents $e)) {
+        $li = Get-Item -LiteralPath (Join-Path $e.Home 'agents') -Force -ErrorAction SilentlyContinue
+        if ($li -and $li.LinkType -and (Test-DsrSamePath ([string]@($li.Target)[0]) (Get-DsrFirmAgentsDir))) { Report 'ok' "$tag agents: shared with the firm home" }
+        else { Report 'WARN' "$tag agents folder isn't linked to the firm home's (Sync-Dossier -Apply)" }
+        $agents = @($agents | Where-Object Role -eq 'lead')
+    }
+    foreach ($a in @($agents | Where-Object { -not (Test-DsrSharesFirmAgents $e) })) {
         if (-not (Test-Path -LiteralPath $a.Source)) { Report 'WARN' "$tag agent '$($a.Name)' ($($a.Role)) has no file at $($a.Source)"; continue }
         $fm = Get-DsrAgentFrontmatter ([IO.File]::ReadAllText($a.Source))
         if ($fm['name'] -cne $a.Name) { Report 'WARN' "$tag $($a.Source) says name: '$($fm['name'])', not '$($a.Name)'"; continue }
@@ -67,7 +74,7 @@ foreach ($e in $reg.Entries) {
         if (-not (Test-Path -LiteralPath $dst) -or [IO.File]::ReadAllText($dst) -ne (Get-DsrInstalledAgent $a)) { $stale += $a.Name }
     }
     if ($stale.Count) { Report 'WARN' "$tag agents out of date: $($stale -join ', ') (Sync-Dossier -Apply)" }
-    elseif ($agents.Count) { Report 'ok' "$tag agents: $(($agents | ForEach-Object { "$($_.Name) ($($_.Role))" }) -join ', ')" }
+    elseif ($agents.Count -and -not (Test-DsrSharesFirmAgents $e)) { Report 'ok' "$tag agents: $(($agents | ForEach-Object { "$($_.Name) ($($_.Role))" }) -join ', ')" }
     $lead = @($agents | Where-Object Role -eq 'lead' | ForEach-Object Name) | Select-Object -First 1
     if ($lead -and (-not $s -or $s.agent -ne $lead)) { Report 'WARN' "$tag main session should run as '$lead', but $settingsFile doesn't set it (Sync-Dossier -Apply)" }
     if ($e.Kind -eq 'firm' -and $s -and $s.permissions -and $s.permissions.additionalDirectories) {

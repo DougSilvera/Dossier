@@ -319,6 +319,8 @@ function Get-DsrEntryAgents($Reg, $Entry) {
     # The agents a home gets, as @{ Role; Name; Source }. By default the firm home gets every
     # role the roster fills; other homes get all but lead (it replaces the main session's
     # prompt, so it is opt-in) and hr (it edits the roster, so it stays in the firm home).
+    # Homes that share the firm's agents see all of them through the link; for those this
+    # list only decides the lead.
     if (-not $Reg.Agents) { return @() }
     $want = if ($null -ne $Entry.AgentRoles) { $Entry.AgentRoles }
             elseif ($Entry.Kind -eq 'firm') { @($Reg.Agents.Roles.Keys) }
@@ -329,6 +331,15 @@ function Get-DsrEntryAgents($Reg, $Entry) {
         [pscustomobject]@{ Role = $role; Name = $name; Source = (Join-Path $Reg.Agents.Source "$name.md") }
     })
 }
+
+function Test-DsrSharesFirmAgents($Entry) {
+    # Homes on the firm's own account (products, no-seat clients) link to the firm home's agents:
+    # one definition of each agent, memory still per home. Only an outside enterprise seat gets
+    # its own copies.
+    return ($Entry.Kind -ne 'firm' -and $Entry.Seat -ne 'enterprise')
+}
+
+function Get-DsrFirmAgentsDir { return (Join-Path (Get-DsrDefaultHome) 'agents') }
 
 function Get-DsrAgentFrontmatter([string] $Text) {
     $m = [regex]::Match($Text, '\A﻿?---\r?\n(.*?)\r?\n---', 'Singleline')

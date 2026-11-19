@@ -698,8 +698,15 @@ try {
         Check "registry rejects $($b.n)" $threw
     }
 
+    # homes that already hold agent files: Dossier's own copies are replaced by the link, anything else stops it
+    $coreHome = "$tmp\.claude-homes\core"; $gHome = "$tmp\.claude-homes\gamma"
+    New-Item -ItemType Directory -Path "$coreHome\agents", "$gHome\agents" -Force | Out-Null
+    [IO.File]::WriteAllText("$coreHome\agents\old.md", "---`nname: old`n---`n`n$($script:DsrAgentMarker)`n")
+    [IO.File]::WriteAllText("$gHome\agents\own.md", "---`nname: own`ndescription: hand-made`n---`n")
+
     $betaOne = With $betaC @{ agentRoles = @('builder') }
-    Write-Registry @($acmeB, $widget, $betaOne, $gamma) -Products @($prod, $core) -Agents $team
+    $betaLead = With $betaC @{ agentRoles = @('lead', 'builder') }
+    Write-Registry @($acmeB, $widget, $betaLead, $gamma) -Products @($prod, $core) -Agents $team
     $r = Run 'Sync-Dossier.ps1' @('-Apply')
     Check 'sync with agents exits 0' ($r.Code -eq 0) "$($r.Out) $($r.Err)"
     $fHome = "$tmp\.claude"
@@ -707,25 +714,32 @@ try {
     $rae = Get-Content -Raw "$fHome\agents\rae.md"
     Check 'installed agent keeps the roster text, then its role contract and common rules' ($rae -match '(?s)\A---\nname: rae.*Voice: dry\..*managed by dossier: role contract.*## Role: reviewer.*Memory, in three layers')
     Check 'firm main session runs as the lead' ((Read-Json "$fHome\settings.json").agent -eq 'chief')
-    Check 'client home gets the team without lead or hr' ((Test-Path "$wHome\agents\bob.md") -and (Test-Path "$wHome\agents\rae.md") -and -not (Test-Path "$wHome\agents\chief.md") -and -not (Test-Path "$wHome\agents\hal.md"))
+    $wl = Get-Item -LiteralPath "$wHome\agents" -Force
+    Check 'a no-seat client home links to the firm home''s agents' ($wl.LinkType -and (Test-DsrSamePath ([string]@($wl.Target)[0]) "$fHome\agents") -and (Test-Path "$wHome\agents\rae.md"))
+    Check 'a product home links too' ((Get-Item -LiteralPath "$coreHome\agents" -Force).LinkType -and (Test-Path "$coreHome\agents\rae.md"))
+    Check 'Dossier''s old copies are replaced by the link' (-not (Test-Path "$fHome\agents\old.md"))
+    Check 'a home with its own agent files isn''t linked' (-not (Get-Item -LiteralPath "$gHome\agents" -Force).LinkType -and (Test-Path "$gHome\agents\own.md") -and $r.Out -match "warn\s+.*gamma\\agents has agents of its own \(own\.md\)") $r.Out
     Check 'client main session is left alone' (-not (Read-Json "$wHome\settings.json").Contains('agent'))
-    Check 'enterprise client home gets the team too' ((Test-Path "$tmp\.claude-homes\acme\agents\bob.md") -and -not (Test-Path "$tmp\.claude-homes\acme\agents\hal.md"))
-    Check 'product home gets the team' (Test-Path "$tmp\.claude-homes\core\agents\rae.md")
-    Check 'agentRoles narrows a home' ((Test-Path "$tmp\.claude-homes\beta\agents\bob.md") -and -not (Test-Path "$tmp\.claude-homes\beta\agents\rae.md"))
+    Check 'a linked home can opt into the lead' ((Read-Json "$tmp\.claude-homes\beta\settings.json").agent -eq 'chief')
+    $aHome = "$tmp\.claude-homes\acme"
+    Check 'an enterprise home gets its own copies, without lead or hr' (-not (Get-Item -LiteralPath "$aHome\agents" -Force).LinkType -and (Test-Path "$aHome\agents\bob.md") -and -not (Test-Path "$aHome\agents\hal.md") -and -not (Test-Path "$aHome\agents\chief.md"))
     $r = Run 'Sync-Dossier.ps1' @('-Apply')
     Check 'sync with agents is idempotent' ($r.Out -match 'In sync\.') $r.Out
     $d = Run 'Test-Dossier.ps1'
-    Check 'doctor lists a home''s agents' ($d.Out -match 'ok\s+\[firm\] agents: chief \(lead\), bob \(builder\), rae \(reviewer\), hal \(hr\)') $d.Out
+    Check 'doctor lists the firm home''s agents' ($d.Out -match 'ok\s+\[firm\] agents: chief \(lead\), bob \(builder\), rae \(reviewer\), hal \(hr\)') $d.Out
+    Check 'doctor accepts the agents link' ($d.Out -match 'ok\s+\[widgetco\] agents: shared with the firm home' -and $d.Out -notmatch '\[widgetco\].*links into another home') $d.Out
+    Check 'doctor flags a home that should be linked' ($d.Out -match "WARN\s+\[gamma\] agents folder isn't linked") $d.Out
+    Remove-Item -Recurse "$gHome\agents"
 
-    # editing the roster: doctor sees it, Sync rolls it out
+    # editing the roster: linked homes see it at once, enterprise copies wait for Sync
     Agent 'rae' 'Voice: very dry.'
     $d = Run 'Test-Dossier.ps1'
-    Check 'doctor finds agents out of date' ($d.Out -match 'WARN\s+\[widgetco\] agents out of date: rae') $d.Out
+    Check 'doctor finds enterprise copies out of date' ($d.Out -match 'WARN\s+\[acme\] agents out of date: bob, rae' -or $d.Out -match 'WARN\s+\[acme\] agents out of date: rae') $d.Out
     Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
-    Check 'sync rolls an edit out to every home' ((Get-Content -Raw "$wHome\agents\rae.md") -match 'very dry' -and (Get-Content -Raw "$fHome\agents\rae.md") -match 'very dry')
+    Check 'sync rolls an edit out to the firm, linked and enterprise homes' ((Get-Content -Raw "$wHome\agents\rae.md") -match 'very dry' -and (Get-Content -Raw "$aHome\agents\rae.md") -match 'very dry')
     Agent 'bob' 'Voice: none.' ''
     $d = Run 'Test-Dossier.ps1'
-    Check 'doctor warns about an agent with no memory' ($d.Out -match "WARN\s+\[widgetco\] agent 'bob' has no 'memory: user'") $d.Out
+    Check 'doctor warns about an agent with no memory' ($d.Out -match "WARN\s+\[firm\] agent 'bob' has no 'memory: user'") $d.Out
     Agent 'bob'
     [IO.File]::WriteAllText("$roster\rae.md", "---`nname: ray`ndescription: x`n---`nbody`n")
     $r = Run 'Sync-Dossier.ps1'
@@ -733,15 +747,20 @@ try {
     Agent 'rae'
 
     # dropping roles removes only Dossier's own files and settings
-    [IO.File]::WriteAllText("$wHome\agents\mine.md", "---`nname: mine`ndescription: hand-made`n---`n")
+    [IO.File]::WriteAllText("$fHome\agents\mine.md", "---`nname: mine`ndescription: hand-made`n---`n")
     $s = Read-Json "$wHome\settings.json"; $s.agent = 'mine'; [IO.File]::WriteAllText("$wHome\settings.json", ($s | ConvertTo-Json -Depth 32))
     $team2 = [ordered]@{ source = '~/.dossier/agents'; roles = [ordered]@{ builder = 'bob'; hr = 'hal' } }
     Write-Registry @($acmeB, $widget, $betaOne, $gamma) -Products @($prod, $core) -Agents $team2
     Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
-    Check 'a dropped role''s agent is removed' (-not (Test-Path "$wHome\agents\rae.md") -and -not (Test-Path "$fHome\agents\rae.md"))
-    Check 'a hand-made agent file is left alone' (Test-Path "$wHome\agents\mine.md")
-    Check 'dropping the lead clears the setting Sync made' (-not (Read-Json "$fHome\settings.json").Contains('agent'))
+    Check 'a dropped role''s agent is removed everywhere' (-not (Test-Path "$fHome\agents\rae.md") -and -not (Test-Path "$wHome\agents\rae.md") -and -not (Test-Path "$aHome\agents\rae.md"))
+    Check 'a hand-made agent file is left alone, and linked homes see it' ((Test-Path "$fHome\agents\mine.md") -and (Test-Path "$wHome\agents\mine.md"))
+    Check 'dropping the lead clears the setting Sync made' (-not (Read-Json "$fHome\settings.json").Contains('agent') -and -not (Read-Json "$tmp\.claude-homes\beta\settings.json").Contains('agent'))
     Check 'a main agent the user set is left alone' ((Read-Json "$wHome\settings.json").agent -eq 'mine')
+
+    # no agents in the registry: Dossier's links go
+    Write-Registry @($acmeB, $widget, $betaOne, $gamma) -Products @($prod, $core)
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    Check 'removing the agents section removes the links' (-not (Test-Path "$wHome\agents") -and (Test-Path "$fHome\agents\mine.md"))
 } finally {
     if ($substDrive) { subst "${substDrive}:" /d 2>$null | Out-Null }
     foreach ($v in $saveVars) { [Environment]::SetEnvironmentVariable($v, $saved[$v]) }

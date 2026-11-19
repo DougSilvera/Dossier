@@ -96,6 +96,7 @@ function Sync-ProductStatus($Entry) {
 }
 
 function Sync-Agents($Entry) {
+    if (Test-DsrSharesFirmAgents $Entry) { Sync-AgentsLink $Entry; return }
     $dir = Join-Path $Entry.Home 'agents'
     $want = @(Get-DsrEntryAgents $reg $Entry)
     $keep = @()
@@ -113,6 +114,35 @@ function Sync-Agents($Entry) {
                 Step "remove $($f.FullName) (no longer in this home's roles)" { Remove-Item -LiteralPath $f.FullName }
             }
         }
+    }
+}
+
+function Sync-AgentsLink($Entry) {
+    $dir = Join-Path $Entry.Home 'agents'
+    $target = Get-DsrFirmAgentsDir
+    $item = Get-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
+    $isOurLink = $item -and $item.LinkType -and (Test-DsrSamePath ([string]@($item.Target)[0]) $target)
+    if (-not $reg.Agents) {
+        if ($isOurLink) { Step "unlink $dir (no agents in the registry)" { [IO.Directory]::Delete($dir) } }
+        return
+    }
+    if ($isOurLink) { return }
+    if ($item -and $item.LinkType) { Write-Host "  warn  $dir links to $(@($item.Target)[0]), not $target; left alone"; return }
+    if ($item) {
+        $files = @(Get-ChildItem -LiteralPath $dir -Force)
+        $own = @($files | Where-Object { $_.PSIsContainer -or -not [IO.File]::ReadAllText($_.FullName).Contains($script:DsrAgentMarker) })
+        if ($own.Count) { Write-Host "  warn  $dir has agents of its own ($(($own | ForEach-Object Name) -join ', ')); move them to your roster, then rerun Sync to link it"; return }
+        Step "replace $dir with a link to $target" {
+            foreach ($f in $files) { Remove-Item -LiteralPath $f.FullName }
+            [IO.Directory]::Delete($dir)
+            New-Item -ItemType Directory -Path $target -Force | Out-Null
+            New-Item -ItemType Junction -Path $dir -Target $target | Out-Null
+        }
+        return
+    }
+    Step "link $dir -> $target" {
+        New-Item -ItemType Directory -Path $target -Force | Out-Null
+        New-Item -ItemType Junction -Path $dir -Target $target | Out-Null
     }
 }
 
