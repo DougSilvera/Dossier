@@ -1,6 +1,6 @@
 # Dossier
 
-Status: in use since 2026-11. 164 tests in `windows/tests/Test-Kit.ps1`.
+Status: in use since 2026-11. 187 tests in `windows/tests/Test-Kit.ps1`.
 
 ## Problem
 
@@ -22,23 +22,25 @@ Every client gets its own home, whatever account it bills. Isolation comes from 
 | `~/.claude` | The firm | Hub, firm-internal work, sandbox |
 | `~/.claude-homes/<client>` (seat: enterprise) | The client's org seat | That client only |
 | `~/.claude-homes/<client>` (seat: none) | The firm | That client only |
-
-Templates (below) have no home of their own: they run in the firm home.
+| `~/.claude-homes/<product>` | The firm | One firm product |
 
 `~/.claude` is the firm home because Claude Code keeps the default home's state file at `~/.claude.json`, outside the directory, and the launcher can't treat it as just another home.
 
-## Templates
+## Products
 
-A template is a firm-owned base repo that client repos are built from: team conventions, patterns, scaffolding. Its default is the opposite of a client's. It is fully shared with the hub, and its content flows one way, toward clients.
+A product is firm-owned work that client work is built on: a reusable codebase, a methods library, or both in one repo. It is its own engagement, with its own home, memory, skills and MCP servers, and its defaults are the opposite of a client's. The hub sees all of it, clients see only what the product lists, and content flows one way, toward clients.
 
-- **Registry:** a `templates` list beside `clients`, each with `key`, `name`, `root`, `repos`, `enterpriseRead` (default false) and `status`. A client lists the templates it is built from in `basedOn`.
-- **Home:** the firm home. Template roots are firm roots, so `cc` in one starts the firm home, its memory sits next to the hub's, and the hub reads its code through `additionalDirectories`. `cc -a <template> --at-root` starts the firm home in the template's root. Each template still gets its own memory, because memory is filed per folder.
-- **Folder:** `~/workspace/templates/<key>/`, a sibling of the hub and `clients/`. Inside the hub, the hub's `CLAUDE.md` would load into every template session, and client homes deny the hub.
-- **Instructions:** the template root's `CLAUDE.md` (Sync writes a stub) holds working notes about the template. Conventions that should ship to every client copy go in the repo's own `CLAUDE.md`.
-- **Client access:** every client home denies every template. A client may read a template only when it lists it in `basedOn`, and an enterprise-seat client only when the template also sets `enterpriseRead: true`, because its sessions run under the client's org terms. A client that may read a template gets it in `additionalDirectories` and an `Edit` deny on it. No client ever edits a template.
-- **Promoting from clients:** manual. The hub, template and client `CLAUDE.md` stubs say to report a client pattern worth promoting as a candidate to the user, and to move nothing from a client toward a template unless the user says so in that turn. Client homes can't edit templates, so for them the deny rules enforce it. In the firm home it's an instruction only.
+- **Registry:** a `products` list beside `clients`, each with `key`, `name`, `root`, optional `home` (default `~/.claude-homes/<key>`), `expectEmail`/`expectOrg` (default: the firm's), `repos`, `clientRead`, `enterpriseRead` (default false) and `status`. A client lists the products it is built on in `basedOn`.
+- **Folder:** `~/workspace/products/<key>/`, a sibling of the hub and `clients/`. Inside the hub, the hub's `CLAUDE.md` would load into every product session, and client homes deny the hub.
+- **Hub access:** the firm home reads and edits every product root, and reads each product home's memory and transcripts (`<home>/projects`, through `additionalDirectories`). It may not edit a product home, or read its login.
+- **Product home:** denied every client's root and home (no-seat clients included), the hub and the firm home. Client lessons reach a product only when the user carries them there.
+- **Client access:** a client reads a product's `clientRead` paths (relative to the product root) only when it lists the product in `basedOn`, and an enterprise-seat client only when the product also sets `enterpriseRead: true`, because its sessions run under the client's org terms. An empty `clientRead` means clients read nothing. No client ever edits a product or reads its home.
+- **How `clientRead` is enforced:** Claude Code's deny rules always beat allow rules, and the `!` exception syntax isn't documented for absolute paths, so a client can't be denied the root and allowed a subfolder. Sync instead lists the product from disk and denies `Read` on everything outside `clientRead`: at each level from the root down to each `clientRead` path, every sibling folder and file, including `.git`, `.claude` and the root `CLAUDE.md`. A `clientRead` path or registered repo that doesn't exist yet is denied at its first missing folder. `Edit` is denied on the whole root. The `clientRead` paths go in the client's `additionalDirectories`.
+- **Drift:** anything added at a listed level after Sync (a folder from a `git pull`, say) is readable by based-on clients until the next Sync. The doctor recomputes the rules from disk and fails with "product changed on disk since the last Sync", so rerun Sync after pulling a product that clients read.
+- **Instructions:** the product root's `CLAUDE.md` (Sync writes a stub) holds working notes about the product; each repo's own `CLAUDE.md` holds its conventions. A based-on client's stub lists the product and the paths it may read.
+- **Promoting from clients:** manual. The hub, product and client `CLAUDE.md` stubs say to report a client pattern worth promoting as a candidate to the user, and to move nothing from a client toward a product unless the user says so in that turn. Client and product homes are kept apart by deny rules. The firm home can read no-seat clients and edit products, so there it's an instruction only.
 
-`Import-Dossier -Key <key> -Apply` brings a client or template onto the machine: Sync, clone each listed repo that isn't there yet, then the doctor. It refuses an enterprise-seat client from inside a Claude session.
+`Import-Dossier -Key <key> -Apply` brings a client or product onto the machine: Sync, clone each listed repo that isn't there yet, then the doctor. It refuses an enterprise-seat client from inside a Claude session.
 
 ## Data rule
 
@@ -53,15 +55,16 @@ Enforcement, strongest first:
 2. **`cc` refuses to cross accounts from inside a session.** A Claude session can't start an enterprise client's home, and an enterprise client's session can't start any other home, because the started session's output flows back to the caller. No-seat clients can still be handed work from the hub with `cc -a <client> --at-root -p "..."`.
 3. **`cc` refuses an enterprise home on the wrong terms:** logged in to an account other than `expectEmail`/`expectOrg`, or with `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX` set in the shell or the home's settings. `--dossier-override` starts it anyway, deliberately. A home that isn't logged in yet starts, so you can `/login`.
 4. **The `dossier-guard` SessionStart hook** flags any session whose home doesn't own its folder, even when the login is the same. It covers launches that bypass `cc`.
-5. **Deny rules.** Each home's user `settings.json` gets `Read`/`Edit` deny rules for everything it must not see. The firm home denies every enterprise root and every client home. A client home denies every other client's root and home, the hub, `~/.claude` and `~/.claude.json`. Rules live at user scope, so they apply in every session of that home wherever it starts.
+5. **Deny rules.** Each home's user `settings.json` gets `Read`/`Edit` deny rules for everything it must not see. The firm home denies every enterprise root and every client home. A client or product home denies every other client's and product's root and home, the hub, `~/.claude` and `~/.claude.json`, except a based-on client's `clientRead` paths (see Products). Rules live at user scope, so they apply in every session of that home wherever it starts.
 6. **The `dossier-shellguard` PreToolUse hook** holds Bash and PowerShell commands to the same deny rules, read from the home's `settings.json`. Without it, deny rules cover only the file tools and the few Bash commands Claude Code recognizes (`cat`, `head`, `tail`, `sed`, `tee`). It denies a command that names a denied path (absolute, relative to the session folder, Git Bash or WSL form, through `~`, `$HOME`, `$env:USERPROFILE` or `%USERPROFILE%`), has a wildcard that can reach one, or searches recursively from a folder that holds one (`rg` in `~/workspace`). It costs about half a second per shell command.
 
 ### What this does not stop
 
 - **Shell reads the shell guard can't see.** It reads the command text, so a path built at run time, a script that opens files on its own (`os.walk('.')` from a parent folder), or a link into a denied folder gets past it. It's a tripwire for honest mistakes. OS-level enforcement is Claude Code's sandbox, which applies `Read` deny rules to every shell command, but the sandbox runs only on macOS, Linux and WSL2. On native Windows `sandbox.enabled` is ignored and commands run unsandboxed, and `sandbox.failIfUnavailable` would stop Claude Code from starting at all, so Sync sets neither.
 - **A determined session.** The session checks in 2 rely on `CLAUDECODE`; a session that unsets it, or runs `claude.exe` with its own `CLAUDE_CONFIG_DIR`, gets past them. They stop accidents and honest mistakes, not an adversary on the machine.
-- **Clients' lessons reaching a template through the firm home.** The hub may edit templates and may read no-seat clients' code, so nothing but its instructions stops it copying one into the other. It must report candidates and wait for the user's word.
-- **Writes the shell guard can't recognize.** For a template a client may read, the shell guard blocks commands that look like writes (common write cmdlets and commands, `>` redirects, `sed -i`, git commands that change files or history) and name it or run from inside it. Anything else that writes gets past it.
+- **Clients' lessons reaching a product through the firm home.** The hub may edit products and may read no-seat clients' code, so nothing but its instructions stops it copying one into the other. It must report candidates and wait for the user's word.
+- **Product folders added since the last Sync.** See "Drift" under Products. The doctor catches them; nothing blocks them in between.
+- **Writes the shell guard can't recognize.** For a product path a client may read, the shell guard blocks commands that look like writes (common write cmdlets and commands, `>` redirects, `sed -i`, git commands that change files or history) and name it or run from inside it. Anything else that writes gets past it.
 - **Shell guard false positives on prose.** It reads the whole command text, so a heredoc or script that merely contains a word like `find` or `tree` can trip the recursive-search check. Write long text with the file tools instead.
 - **Deny rules through links.** `cc` and the guard resolve links; whether Claude Code's own deny-rule matching does is untested. Open client work by its real path.
 
@@ -74,8 +77,8 @@ Enforcement, strongest first:
   clients/
     <client>/             client root; CLAUDE.md = client-wide rules, never committed to client repos
       <repo>/ ...
-  templates/
-    <template>/           template root; firm home; CLAUDE.md = working notes, not committed
+  products/
+    <product>/            product root; its own home; CLAUDE.md = working notes, not committed
       <repo>/
   sandbox/                personal experiments; firm home
 ```
@@ -88,6 +91,7 @@ The hub is a sibling of `clients/`, not a parent, because Claude Code loads ever
 |---|---|---|
 | Personal | each home's `CLAUDE.md`, generated from one personal source | Rules that are true everywhere (git, comments, mentions) |
 | Client | `clients/<client>/CLAUDE.md` | Client standing orders: DBs, environments, ticket process, docs |
+| Product | `products/<product>/CLAUDE.md` | Working notes on a firm product: what clients may read, open decisions |
 | Repo | the repo's own `CLAUDE.md` | Team convention, owned by the client's repo |
 
 Settings and `.mcp.json` are not inherited from parent folders, so client-wide MCP servers and settings go in the client's home (user scope), not the client root.
@@ -97,7 +101,7 @@ Settings and `.mcp.json` are not inherited from parent folders, so client-wide M
 | Committed (this repo) | Local only |
 |---|---|
 | Registry schema and `dossier.example.json` | `~/.dossier.json` (the person's real registry) |
-| Templates for hub and client `CLAUDE.md` | The person's personal rules source (`~/.dossier/personal.md`) |
+| Templates for hub, client and product `CLAUDE.md` | The person's personal rules source (`~/.dossier/personal.md`) |
 | Launcher, guard hooks, sync, doctor, tests | Logins (`.credentials.json`, `.claude.json`) |
 | | Memory, transcripts, client secrets, backups |
 
@@ -107,12 +111,12 @@ Settings and `.mcp.json` are not inherited from parent folders, so client-wide M
 |---|---|
 | `Dossier.ps1` | Dot-source from `$PROFILE`: defines `cc`, `cc-<key>`, and a `claude` that goes through the launcher (opt out with `DOSSIER_NO_CLAUDE_SHIM=1`). Git Bash: `source dossier.bash`. |
 | `Invoke-Dossier.ps1` | The launcher. Picks the home that owns the folder, applies the refusals above, clears only the variables a session hands its children, never copies between homes. |
-| `Sync-Dossier.ps1` | Makes the machine match the registry: roots, homes, deny rules, `additionalDirectories`, guard hooks, personal `CLAUDE.md`, shared skills, hub table, client stubs. Dry run unless `-Apply`. Only removes rules it added (tracked in `<home>\dossier.managed.json`); never overwrites a `CLAUDE.md` it didn't write. Every file it rewrites keeps a timestamped `.bak`. |
-| `Test-Dossier.ps1` | Read-only doctor: logins, cross-home links, ancestor `CLAUDE.md`, deny rules, guard hooks, one entry's or template's memory in another home (including `formerRoots`), unregistered folders, templates blocked for an enterprise client, repos not cloned yet, leftover kit wiring. |
-| `Import-Dossier.ps1` | Clones a registered client's or template's `repos` into its root after a Sync, then runs the doctor. Dry run unless `-Apply`. Never touches an existing folder. |
+| `Sync-Dossier.ps1` | Makes the machine match the registry: roots, homes, deny rules, `additionalDirectories`, guard hooks, personal `CLAUDE.md`, shared skills, hub tables, client and product stubs. Dry run unless `-Apply`. Only removes rules it added (tracked in `<home>\dossier.managed.json`); never overwrites a `CLAUDE.md` it didn't write. Every file it rewrites keeps a timestamped `.bak`. |
+| `Test-Dossier.ps1` | Read-only doctor: logins, cross-home links, ancestor `CLAUDE.md`, deny rules, guard hooks, one entry's memory in another's home (including `formerRoots`), unregistered folders, product folders added since the last Sync, products blocked for an enterprise client, repos not cloned yet, leftover kit wiring. |
+| `Import-Dossier.ps1` | Clones a registered client's or product's `repos` into its root after a Sync, then runs the doctor. Dry run unless `-Apply`. Never touches an existing folder. |
 | `dossier-guard.ps1` | SessionStart hook. Silent when everything matches. |
 | `dossier-shellguard.ps1` | PreToolUse hook for Bash and PowerShell. Denies commands that reach a path the home's `Read` deny rules cover, and writes to a path it may only read; silent otherwise. |
-| `tests/Test-Kit.ps1` | 164 checks against a throwaway `USERPROFILE` and a stub `claude`. |
+| `tests/Test-Kit.ps1` | 187 checks against a throwaway `USERPROFILE` and a stub `claude`. |
 
 Setting up a home: `Sync-Dossier -Apply`, then `cc -a <key>` and `/login` as the expected account, then `Test-Dossier`.
 

@@ -19,12 +19,12 @@ $env:DOSSIER_CONFIG = Join-Path $tmp '.dossier.json'
 $ws = Join-Path $tmp 'workspace'
 $substDrive = $null
 
-function Write-Registry($Clients, [string] $Personal = '~/.dossier/personal.md', [string[]] $Shared = @(), $Templates = @()) {
+function Write-Registry($Clients, [string] $Personal = '~/.dossier/personal.md', [string[]] $Shared = @(), $Products = @()) {
     $r = [ordered]@{
         workspaceRoot = '~/workspace'; personalRules = $Personal; sharedSkills = $Shared
         firm = [ordered]@{ hubRoot = '~/workspace/hub'; sandboxRoot = '~/workspace/sandbox'; expectEmail = 'me@firm.test' }
         clients = $Clients
-        templates = @($Templates)
+        products = @($Products)
     }
     [IO.File]::WriteAllText($env:DOSSIER_CONFIG, ($r | ConvertTo-Json -Depth 8))
 }
@@ -405,65 +405,85 @@ try {
     $d = Run 'Test-Dossier.ps1'
     Check 'doctor: prefix keys are not a false leak' ($d.Code -eq 0) $d.Out
 
-    # --- templates
-    $tpl = [ordered]@{ key = 'base'; name = 'Base'; root = '~/workspace/templates/base' }
-    $badTpl = @(
-        @{ n = 'basedOn an unknown template'; c = @(Client @{ basedOn = @('nope') }); t = @($tpl) },
-        @{ n = 'template key equal to a client key'; c = @(Client @{ key = 'base' }); t = @($tpl) },
-        @{ n = 'template root inside a client root'; c = @($widget); t = @([ordered]@{ key = 'base'; root = '~/workspace/clients/widgetco/base' }) },
-        @{ n = 'template enterpriseRead that isn''t a boolean'; c = @($widget); t = @([ordered]@{ key = 'base'; root = '~/workspace/templates/base'; enterpriseRead = 'yes' }) },
-        @{ n = 'a repo remote starting with -'; c = @($widget); t = @([ordered]@{ key = 'base'; root = '~/workspace/templates/base'; repos = @(@{ remote = '--upload-pack=x' }) }) }
+    # --- products
+    $prod = [ordered]@{ key = 'base'; name = 'Base'; root = '~/workspace/products/base' }
+    function With([System.Collections.IDictionary] $Base, [hashtable] $Extra) { $c = [ordered]@{}; foreach ($k in $Base.Keys) { $c[$k] = $Base[$k] }; foreach ($k in $Extra.Keys) { $c[$k] = $Extra[$k] }; return $c }
+    $badProd = @(
+        @{ n = 'basedOn an unknown product'; c = @(Client @{ basedOn = @('nope') }); p = @($prod) },
+        @{ n = 'product key equal to a client key'; c = @(Client @{ key = 'base' }); p = @($prod) },
+        @{ n = 'product root inside a client root'; c = @($widget); p = @(With $prod @{ root = '~/workspace/clients/widgetco/base' }) },
+        @{ n = 'product home inside ~/.claude'; c = @($widget); p = @(With $prod @{ home = '~/.claude/base' }) },
+        @{ n = 'product enterpriseRead that isn''t a boolean'; c = @($widget); p = @(With $prod @{ enterpriseRead = 'yes' }) },
+        @{ n = 'a repo remote starting with -'; c = @($widget); p = @(With $prod @{ repos = @(@{ remote = '--upload-pack=x' }) }) },
+        @{ n = 'clientRead with ..'; c = @($widget); p = @(With $prod @{ clientRead = @('src/../..') }) },
+        @{ n = 'clientRead that is absolute'; c = @($widget); p = @(With $prod @{ clientRead = @('C:/x') }) },
+        @{ n = 'clientRead with a wildcard'; c = @($widget); p = @(With $prod @{ clientRead = @('src/*') }) }
     )
-    foreach ($b in $badTpl) {
-        Write-Registry $b.c -Templates $b.t
+    foreach ($b in $badProd) {
+        Write-Registry $b.c -Products $b.p
         $threw = $false; try { Read-DsrRegistry | Out-Null } catch { $threw = $true }
         Check "registry rejects $($b.n)" $threw
     }
+    $raw = Get-Content -Raw $env:DOSSIER_CONFIG | ConvertFrom-Json -AsHashtable; $raw.templates = @(); $raw.Remove('products')
+    [IO.File]::WriteAllText($env:DOSSIER_CONFIG, ($raw | ConvertTo-Json -Depth 8))
+    $threw = $false; try { Read-DsrRegistry | Out-Null } catch { $threw = $_.Exception.Message -match 'now .products' }
+    Check 'registry rejects the old templates section by name' $threw
 
     $src = Join-Path $tmp 'src'
     RunExe 'git' @('init', '-q', $src) $tmp | Out-Null
     [IO.File]::WriteAllText("$src\README.md", 'base')
     RunExe 'git' @('-C', $src, 'add', '.') $tmp | Out-Null
     RunExe 'git' @('-C', $src, '-c', 'user.name=t', '-c', 'user.email=t@t.test', 'commit', '-q', '-m', 'init') $tmp | Out-Null
-    $tpl.repos = @(@{ remote = $src })
-    $acmeB = [ordered]@{}; foreach ($k in $acme.Keys) { $acmeB[$k] = $acme[$k] }
-    $acmeB.basedOn = @('base'); $acmeB.repos = @(@{ remote = $src })
-    $widgetB = [ordered]@{}; foreach ($k in $widget.Keys) { $widgetB[$k] = $widget[$k] }
-    $widgetB.basedOn = @('base')
+    $prod = With $prod @{ clientRead = @('src/code'); repos = @(@{ remote = $src }) }
+    $acmeB = With $acme @{ basedOn = @('base'); repos = @(@{ remote = $src }) }
+    $widgetB = With $widget @{ basedOn = @('base') }
     $beta = [ordered]@{ key = 'beta'; name = 'Beta'; root = '~/workspace/clients/beta'; seat = 'none'; expectEmail = 'me@firm.test'; basedOn = @('base') }
-    Write-Registry @($acmeB, $widgetB, $beta) -Templates @($tpl)
+    $gamma = [ordered]@{ key = 'gamma'; root = '~/workspace/clients/gamma'; seat = 'none'; expectEmail = 'me@firm.test' }
+    Write-Registry @($acmeB, $widgetB, $beta, $gamma) -Products @($prod)
     $reg = Read-DsrRegistry
-    Check 'owner: a template root is the firm' ((Find-DsrOwner $reg "$ws\templates\base\src").Entry.Key -eq 'firm')
+    Check 'owner: a product root is the product' ((Find-DsrOwner $reg "$ws\products\base\src").Entry.Key -eq 'base')
+    Check 'a product logs in to the firm account by default' ((Find-DsrEntry $reg 'base').ExpectEmail -eq 'me@firm.test')
 
     $r = Run 'Sync-Dossier.ps1' @('-Apply')
-    Check 'sync with a template exits 0' ($r.Code -eq 0) "$($r.Out) $($r.Err)"
-    Check 'sync warns about an enterprise client the template blocks' ($r.Out -match "warn\s+'acme' is based on 'base'") $r.Out
-    $tplRule = Rule "$ws\templates\base"; $tplEdit = $tplRule.Replace('Read(', 'Edit(')
-    Check 'sync created the template root and its stub' ((Get-Content -Raw "$ws\templates\base\CLAUDE.md") -match 'Base: template notes')
+    Check 'sync with a product exits 0' ($r.Code -eq 0) "$($r.Out) $($r.Err)"
+    Check 'sync warns about an enterprise client the product blocks' ($r.Out -match "warn\s+'acme' is based on 'base'") $r.Out
+    $pRoot = "$ws\products\base"; $pHome = "$tmp\.claude-homes\base"
+    Check 'sync created the product root, home and stub' ((Test-Path $pHome) -and (Get-Content -Raw "$pRoot\CLAUDE.md") -match 'Base: product notes')
+    $pRootRule = Rule $pRoot; $pRootEdit = $pRootRule.Replace('Read(', 'Edit(')
+    $pHomeRule = Rule $pHome; $pHomeEdit = $pHomeRule.Replace('Read(', 'Edit(')
     $fz = Read-Json "$tmp\.claude\settings.json"
-    Check 'firm reads templates' (@($fz.permissions.additionalDirectories) -contains "$ws\templates\base".Replace('\', '/'))
-    Check 'firm has no template deny rule' ($tplRule -notin $fz.permissions.deny -and $tplEdit -notin $fz.permissions.deny)
+    Check 'firm reads the product and its memory' (@($fz.permissions.additionalDirectories) -contains $pRoot.Replace('\', '/') -and @($fz.permissions.additionalDirectories) -contains "$pHome\projects".Replace('\', '/'))
+    Check 'firm may read but not edit the product home' ($pHomeEdit -in $fz.permissions.deny -and $pHomeRule -notin $fz.permissions.deny)
+    Check 'firm is kept out of the product login' ((Rule "$pHome\.credentials.json" -File) -in $fz.permissions.deny -and (Rule "$pHome\.claude.json" -File) -in $fz.permissions.deny)
+    Check 'firm has no deny rule on the product root' ($pRootRule -notin $fz.permissions.deny -and $pRootEdit -notin $fz.permissions.deny)
+    $bz = Read-Json "$pHome\settings.json"
+    Check 'product home is kept out of every client and the hub' ($widgetRule -in $bz.permissions.deny -and $acmeRule -in $bz.permissions.deny -and $hubRule -in $bz.permissions.deny -and $firmHomeRule -in $bz.permissions.deny)
+    Check 'product home may read its own root' ($pRootRule -notin $bz.permissions.deny)
     $wz = Read-Json "$tmp\.claude-homes\widgetco\settings.json"
-    Check 'based-on client may read but not edit' ($tplEdit -in $wz.permissions.deny -and $tplRule -notin $wz.permissions.deny -and @($wz.permissions.additionalDirectories) -contains "$ws\templates\base".Replace('\', '/'))
+    Check 'client: product root edit denied, not read' ($pRootEdit -in $wz.permissions.deny -and $pRootRule -notin $wz.permissions.deny)
+    Check 'client: product home denied' ($pHomeRule -in $wz.permissions.deny)
+    Check 'client: an uncloned repo on the clientRead path is denied' ((Rule "$pRoot\src") -in $wz.permissions.deny) ($wz.permissions.deny -join "`n")
+    Check 'client: the product stub CLAUDE.md is denied' ((Rule "$pRoot\CLAUDE.md" -File) -in $wz.permissions.deny)
     $ac = Read-Json "$tmp\.claude-homes\acme\settings.json"
-    Check 'enterprise client is blocked without enterpriseRead' ($tplRule -in $ac.permissions.deny -and $tplEdit -in $ac.permissions.deny -and -not $ac.permissions.Contains('additionalDirectories'))
-    Check 'new based-on client stub names its template' ((Get-Content -Raw "$ws\clients\beta\CLAUDE.md") -match "## Templates[\s\S]*Base: ``$([regex]::Escape("$ws\templates\base"))``")
+    Check 'enterprise client is blocked without enterpriseRead' ($pRootRule -in $ac.permissions.deny -and $pRootEdit -in $ac.permissions.deny)
+    $gz = Read-Json "$tmp\.claude-homes\gamma\settings.json"
+    Check 'client not based on the product is denied it' ($pRootRule -in $gz.permissions.deny)
+    Check 'based-on client stub names the product and its paths' ((Get-Content -Raw "$ws\clients\beta\CLAUDE.md") -match "## Products[\s\S]*Base: ``$([regex]::Escape("$pRoot\src\code"))``")
     $hub = Get-Content -Raw "$ws\hub\CLAUDE.md"
-    Check 'hub table lists the template and who uses it' ($hub -match '\| base \| Base \| .* \| no \| acme \(blocked: enterprise\), widgetco, beta \|') $hub
+    Check 'hub table lists the product and who uses it' ($hub -match '\| base \| Base \| .* \| `src\\code` \| no \| acme \(blocked: enterprise\), widgetco, beta \|') $hub
     $r = Run 'Sync-Dossier.ps1' @('-Apply')
-    Check 'sync with templates is idempotent' ($r.Out -match 'In sync\.') $r.Out
+    Check 'sync with products is idempotent' ($r.Out -match 'In sync\.') $r.Out
 
-    $d = Run 'Test-Dossier.ps1'
-    Check 'doctor warns about the blocked enterprise client' ($d.Out -match "WARN\s+\[acme\] is based on template 'base'") $d.Out
-    Check 'doctor warns about repos not cloned' ($d.Out -match 'WARN\s+\[base\] repos not cloned yet: src') $d.Out
-
-    # import
+    # import, then the clientRead path appears
     $r = Run 'Import-Dossier.ps1' @('-Key', 'base')
-    Check 'import dry run clones nothing' ($r.Code -eq 0 -and $r.Out -match 'plan\s+clone' -and -not (Test-Path "$ws\templates\base\src")) "$($r.Out) $($r.Err)"
+    Check 'import dry run clones nothing' ($r.Code -eq 0 -and $r.Out -match 'plan\s+clone' -and -not (Test-Path "$pRoot\src")) "$($r.Out) $($r.Err)"
     $r = Run 'Import-Dossier.ps1' @('-Key', 'base', '-Apply')
-    Check 'import clones the template repo' ($r.Code -eq 0 -and (Test-Path "$ws\templates\base\src\README.md")) "$($r.Out) $($r.Err)"
+    Check 'import clones the product repo' ($r.Code -eq 0 -and (Test-Path "$pRoot\src\README.md")) "$($r.Out) $($r.Err)"
+    Check 'import: the doctor flags the product as changed since Sync' ($r.Out -match 'product base changed on disk') $r.Out
+    $wz = Read-Json "$tmp\.claude-homes\widgetco\settings.json"
+    Check 'import: the new clone stays denied until Sync' ((Rule "$pRoot\src") -in $wz.permissions.deny)
     $r = Run 'Import-Dossier.ps1' @('-Key', 'base', '-Apply')
-    Check 'import is idempotent' ($r.Code -eq 0 -and $r.Out -match 'already cloned') $r.Out
+    Check 'import is idempotent' ($r.Out -match 'already cloned') $r.Out
     $r = Run 'Import-Dossier.ps1' @('-Key', 'nope')
     Check 'import rejects an unknown key' ($r.Code -eq 1)
     $env:CLAUDECODE = '1'
@@ -471,62 +491,83 @@ try {
     Check 'import refuses an enterprise client from a session' ($r.Code -eq 1 -and $r.Err -match 'Refused' -and -not (Test-Path "$ws\clients\acme\src"))
     Remove-Item Env:\CLAUDECODE
 
+    New-Item -ItemType Directory -Path "$pRoot\src\code" | Out-Null
+    [IO.File]::WriteAllText("$pRoot\src\code\app.txt", 'code')
+    [IO.File]::WriteAllText("$pRoot\src\secret.md", 'internal')
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    $wz = Read-Json "$tmp\.claude-homes\widgetco\settings.json"
+    Check 'client: clientRead path readable' (@($wz.permissions.deny | Where-Object { $_ -like "Read($(ConvertTo-DsrRulePath "$pRoot\src\code")*" }).Count -eq 0) ($wz.permissions.deny -join "`n")
+    Check 'client: siblings of the clientRead path denied' ((Rule "$pRoot\src\secret.md" -File) -in $wz.permissions.deny -and (Rule "$pRoot\src\README.md" -File) -in $wz.permissions.deny -and (Rule "$pRoot\src\.git") -in $wz.permissions.deny)
+    Check 'client: the stale whole-repo deny is gone' ((Rule "$pRoot\src") -notin $wz.permissions.deny)
+    Check 'client: clientRead path in additionalDirectories' (@($wz.permissions.additionalDirectories) -contains "$pRoot\src\code".Replace('\', '/'))
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor passes a clean setup with products' ($d.Code -eq 0) $d.Out
+    Check 'doctor warns about the blocked enterprise client' ($d.Out -match "WARN\s+\[acme\] is based on product 'base'") $d.Out
+
+    # shell guard
+    $wHome = "$tmp\.claude-homes\widgetco"
+    $prodCases = @(
+        @{ n = 'read inside clientRead'; c = "Get-Content $pRoot\src\code\app.txt"; d = "$ws\clients\widgetco"; deny = $false }
+        @{ n = 'read a sibling'; c = "Get-Content $pRoot\src\secret.md"; d = "$ws\clients\widgetco"; deny = $true }
+        @{ n = 'read the git folder'; c = "cat $pRoot\src\.git\config"; d = "$ws\clients\widgetco"; deny = $true }
+        @{ n = 'search from the product root'; c = 'rg TODO'; d = $pRoot; deny = $true }
+        @{ n = 'search inside clientRead'; c = 'rg TODO'; d = "$pRoot\src\code"; deny = $false }
+        @{ n = 'write inside clientRead'; c = "Set-Content $pRoot\src\code\app.txt x"; d = "$ws\clients\widgetco"; deny = $true }
+        @{ n = 'git commit inside clientRead'; c = 'git commit -am x'; d = "$pRoot\src\code"; deny = $true }
+    )
+    foreach ($c in $prodCases) {
+        $r = Shell $c.c $c.d $wHome
+        $isDenied = $r.Out -match '"permissionDecision":"deny"'
+        Check "shell guard, client on a product: $($c.n) $(if ($c.deny) { 'denied' } else { 'allowed' })" ($r.Code -eq 0 -and $isDenied -eq $c.deny) "$($c.c) -> $($r.Out) $($r.Err)"
+    }
+    $r = Shell "cat $pRoot\src\code\app.txt" "$ws\clients\gamma" "$tmp\.claude-homes\gamma"
+    Check 'shell guard: a client not based on the product can''t read it' ($r.Out -match '"deny"') $r.Out
+    $r = Shell "Set-Content $pRoot\src\secret.md x" "$ws\hub" ''
+    Check 'shell guard: the firm may edit a product' ($r.Out -eq '') $r.Out
+    $r = Shell "cat $ws\clients\widgetco\CLAUDE.md" $pRoot $pHome
+    Check 'shell guard: a product home can''t read a client' ($r.Out -match '"deny"') $r.Out
+
+    # drift: a folder added beside clientRead is caught, and Sync closes it
+    New-Item -ItemType Directory -Path "$pRoot\src\internal" | Out-Null
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor finds a product folder added since Sync' ($d.Code -eq 1 -and $d.Out -match 'product base changed on disk') $d.Out
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    $d = Run 'Test-Dossier.ps1'
+    Check 'sync closes the new folder' ($d.Code -eq 0 -and (Rule "$pRoot\src\internal") -in (Read-Json "$wHome\settings.json").permissions.deny) $d.Out
+
+    # enterpriseRead opens clientRead to the enterprise client
+    $prod.enterpriseRead = $true
+    Write-Registry @($acmeB, $widgetB, $beta, $gamma) -Products @($prod)
+    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    $ac = Read-Json "$tmp\.claude-homes\acme\settings.json"
+    Check 'enterpriseRead: enterprise client reads clientRead only' ($pRootEdit -in $ac.permissions.deny -and $pRootRule -notin $ac.permissions.deny -and (Rule "$pRoot\src\secret.md" -File) -in $ac.permissions.deny)
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor stops warning once enterpriseRead is set' ($d.Out -notmatch 'is based on product') $d.Out
+
     # launcher
     $env:CLAUDE_BIN = $stub
     Clear-Stub
     Run 'Invoke-Dossier.ps1' @('-a', 'base', '--at-root', '-p', 'x') $tmp | Out-Null
-    Check 'cc -a <template> --at-root: firm home in the template root' ((Stub) -like "dir=|*cwd=$ws\templates\base|*") (Stub)
-    Run 'Invoke-Dossier.ps1' @() "$ws\templates\base\src" | Out-Null
-    Check 'cc in a template uses the firm home' ((Stub) -like 'dir=|*') (Stub)
+    Check 'cc -a <product> --at-root: its home in its root' ((Stub) -like "dir=$pHome|*cwd=$pRoot|*") (Stub)
+    Run 'Invoke-Dossier.ps1' @() "$pRoot\src" | Out-Null
+    Check 'cc in a product uses its home' ((Stub) -like "dir=$pHome|*") (Stub)
     Remove-Item Env:\CLAUDE_BIN
 
-    # enterpriseRead opens the template to the enterprise client, read only
-    $tpl.enterpriseRead = $true
-    $gamma = [ordered]@{ key = 'gamma'; root = '~/workspace/clients/gamma'; seat = 'none'; expectEmail = 'me@firm.test' }
-    Write-Registry @($acmeB, $widgetB, $beta, $gamma) -Templates @($tpl)
-    Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
-    $ac = Read-Json "$tmp\.claude-homes\acme\settings.json"
-    Check 'enterpriseRead lets a based-on enterprise client read, not edit' ($tplEdit -in $ac.permissions.deny -and $tplRule -notin $ac.permissions.deny)
+    # doctor: memory and ancestors
+    New-Item -ItemType Directory -Path "$wHome\projects\$(Get-DsrProjectSlug "$pRoot\src")" -Force | Out-Null
     $d = Run 'Test-Dossier.ps1'
-    Check 'doctor stops warning once enterpriseRead is set' ($d.Out -notmatch 'is based on template') $d.Out
+    Check 'doctor finds product memory in a client home' ($d.Code -eq 1 -and $d.Out -match "\[widgetco\] holds 1 project folder\(s\) for 'base'") $d.Out
+    Remove-Item -Recurse "$wHome\projects"
+    [IO.File]::WriteAllText("$ws\products\CLAUDE.md", 'x')
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor finds a CLAUDE.md above a product root' ($d.Out -match 'above the product root')
+    Remove-Item "$ws\products\CLAUDE.md"
 
-    # shell guard on a read-only template
-    $tplFile = "$ws\templates\base\src\README.md"
-    $tplCases = @(
-        @{ n = 'read'; c = "Get-Content $tplFile"; d = "$ws\clients\widgetco"; deny = $false }
-        @{ n = 'git status inside it'; c = 'git status'; d = "$ws\templates\base\src"; deny = $false }
-        @{ n = 'write to it'; c = "Set-Content $tplFile x"; d = "$ws\clients\widgetco"; deny = $true }
-        @{ n = 'redirect into it'; c = "echo x > $tplFile"; d = "$ws\clients\widgetco"; deny = $true }
-        @{ n = 'copy into it'; c = "cp a.txt $ws\templates\base\src\"; d = "$ws\clients\widgetco"; deny = $true }
-        @{ n = 'git commit inside it'; c = 'git commit -am x'; d = "$ws\templates\base\src"; deny = $true }
-    )
-    foreach ($c in $tplCases) {
-        $r = Shell $c.c $c.d "$tmp\.claude-homes\widgetco"
-        $isDenied = $r.Out -match '"permissionDecision":"deny"'
-        Check "shell guard, read-only template: $($c.n) $(if ($c.deny) { 'denied' } else { 'allowed' })" ($r.Code -eq 0 -and $isDenied -eq $c.deny) "$($c.c) -> $($r.Out) $($r.Err)"
-    }
-    $r = Shell "cat $tplFile" "$ws\clients\gamma" "$tmp\.claude-homes\gamma"
-    Check 'shell guard: a client not based on the template can''t read it' ($r.Out -match '"deny"') $r.Out
-    $r = Shell "Set-Content $tplFile x" "$ws\hub" ''
-    Check 'shell guard: the firm may edit a template' ($r.Out -eq '') $r.Out
-
-    # doctor
-    $d = Run 'Test-Dossier.ps1'
-    Check 'doctor passes a clean setup with templates' ($d.Code -eq 0) $d.Out
-    New-Item -ItemType Directory -Path "$tmp\.claude-homes\widgetco\projects\$(Get-DsrProjectSlug "$ws\templates\base\src")" -Force | Out-Null
-    $d = Run 'Test-Dossier.ps1'
-    Check 'doctor finds template memory in a client home' ($d.Code -eq 1 -and $d.Out -match "\[widgetco\] holds 1 project folder\(s\) for 'template base'") $d.Out
-    Remove-Item -Recurse "$tmp\.claude-homes\widgetco\projects"
-    $s = Read-Json "$tmp\.claude-homes\widgetco\settings.json"; $orig = $s | ConvertTo-Json -Depth 32
-    $s.permissions.deny = @($s.permissions.deny | Where-Object { $_ -ne $tplEdit })
-    [IO.File]::WriteAllText("$tmp\.claude-homes\widgetco\settings.json", ($s | ConvertTo-Json -Depth 32))
-    $d = Run 'Test-Dossier.ps1'
-    Check 'doctor finds a client that could edit a template' ($d.Code -eq 1 -and $d.Out -match "\[widgetco\] missing deny rules: $([regex]::Escape($tplEdit))") $d.Out
-    [IO.File]::WriteAllText("$tmp\.claude-homes\widgetco\settings.json", $orig)
-    [IO.File]::WriteAllText("$ws\templates\CLAUDE.md", 'x')
-    $d = Run 'Test-Dossier.ps1'
-    Check 'doctor finds a CLAUDE.md above a template root' ($d.Out -match 'above the template root')
-    Remove-Item "$ws\templates\CLAUDE.md"
+    # a registered repo beside clientRead is denied before it is cloned
+    $prod.repos = @(@{ remote = $src }, @{ remote = $src; dir = 'later' })
+    Write-Registry @($acmeB, $widgetB, $beta, $gamma) -Products @($prod)
+    $reg = Read-DsrRegistry
+    Check 'an uncloned repo beside clientRead is denied ahead of time' (@(Get-DsrProductReadDenies (Find-DsrEntry $reg 'base') | Where-Object { $_.Path -eq "$pRoot\later" }).Count -eq 1)
 } finally {
     if ($substDrive) { subst "${substDrive}:" /d 2>$null | Out-Null }
     foreach ($v in $saveVars) { [Environment]::SetEnvironmentVariable($v, $saved[$v]) }

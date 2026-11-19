@@ -1,14 +1,16 @@
-# Import-Dossier.ps1 - bring a registered client or template's repos onto this machine.
+# Import-Dossier.ps1 - bring a registered client or product's repos onto this machine.
 # Shows the plan; -Apply does it.
 #
-#   pwsh -File Import-Dossier.ps1 -Key base-template           # dry run
-#   pwsh -File Import-Dossier.ps1 -Key base-template -Apply
+#   pwsh -File Import-Dossier.ps1 -Key base-product           # dry run
+#   pwsh -File Import-Dossier.ps1 -Key base-product -Apply
 #
 # The entry must already be in the registry, with its repos listed:
 #   "repos": [{ "remote": "git@host:org/repo.git", "dir": "optional folder name" }]
 # Runs Sync-Dossier (roots, homes, rules), clones each repo that isn't in <root>\<dir> yet, then
 # runs Test-Dossier. Never touches a folder that already exists. Refuses an enterprise-seat
-# client from inside a Claude session: run it from your own terminal.
+# client from inside a Claude session: run it from your own terminal. After cloning into a
+# product that clients read, rerun Sync-Dossier -Apply: the clientRead deny rules are listed
+# from disk, and until then the new folders are denied wholesale.
 
 param([Parameter(Mandatory)] [string] $Key, [switch] $Apply)
 $ErrorActionPreference = 'Stop'
@@ -18,15 +20,14 @@ if (-not (Test-DsrPowerShell7)) { Write-DsrErr 'Import-Dossier needs PowerShell 
 try { $reg = Read-DsrRegistry } catch { Write-DsrErr $_.Exception.Message; exit 1 }
 
 $entry = Find-DsrEntry $reg $Key
-$template = Find-DsrTemplate $reg $Key
-if ($entry -and $entry.Kind -eq 'client') { $root = $entry.Roots[0]; $repos = $entry.Repos; $what = "client '$($entry.Key)' ($($entry.Seat) seat)" }
-elseif ($template) { $root = $template.Root; $repos = $template.Repos; $what = "template '$($template.Key)' (firm home)" }
-else {
-    Write-DsrErr "No client or template '$Key' in $($reg.Path). Add it first, for example:"
-    Write-DsrErr '  "templates": [{ "key": "<key>", "name": "<name>", "root": "~/workspace/templates/<key>", "enterpriseRead": false, "repos": [{ "remote": "<ssh url>" }] }]'
+if (-not $entry -or $entry.Kind -eq 'firm') {
+    Write-DsrErr "No client or product '$Key' in $($reg.Path). Add it first, for example:"
+    Write-DsrErr '  "products": [{ "key": "<key>", "name": "<name>", "root": "~/workspace/products/<key>", "clientRead": [], "enterpriseRead": false, "repos": [{ "remote": "<ssh url>" }] }]'
     exit 1
 }
-if ($entry -and $entry.Seat -eq 'enterprise' -and $env:CLAUDECODE) {
+$root = $entry.Roots[0]; $repos = $entry.Repos
+$what = if ($entry.Kind -eq 'product') { "product '$($entry.Key)'" } else { "client '$($entry.Key)' ($($entry.Seat) seat)" }
+if ($entry.Seat -eq 'enterprise' -and $env:CLAUDECODE) {
     Write-DsrErr "Refused: '$($entry.Key)' is an enterprise seat, and this is a Claude session. Run Import-Dossier from your own terminal."
     exit 1
 }

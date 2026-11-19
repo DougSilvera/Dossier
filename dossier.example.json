@@ -33,11 +33,12 @@
       "status": "active"
     }
   ],
-  "templates": [
+  "products": [
     {
       "key": "base-app",
       "name": "Base App",
-      "root": "~/workspace/templates/base-app",
+      "root": "~/workspace/products/base-app",
+      "clientRead": ["base-app/src", "base-app/docs/public"],
       "enterpriseRead": false,
       "repos": [{ "remote": "git@github.com:yourfirm/base-app.git" }],
       "status": "active"

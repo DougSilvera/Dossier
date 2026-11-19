@@ -42,8 +42,9 @@ Fill in each client's rules in `~/workspace/clients/<client>/CLAUDE.md`, which S
 | To | Do |
 |---|---|
 | Add a client | Add it to the registry, run `Sync-Dossier -Apply`, then `cc -a <key>` and `/login` |
-| Add a template | Add it under `templates` with its `repos`, then `Import-Dossier -Key <key> -Apply`. List it in a client's `basedOn` to let that client read it; an enterprise-seat client also needs the template's `enterpriseRead: true`. |
-| Clone a client's or template's repos | List them in the entry's `repos`, then `Import-Dossier -Key <key> -Apply` (dry run without `-Apply`). For an enterprise-seat client, run it from your own terminal. |
+| Add a product | Add it under `products` with its `repos`, then `Import-Dossier -Key <key> -Apply`, then `cc -a <key>` and `/login` as the firm. List the paths clients may read in `clientRead`, and the product in each such client's `basedOn`; an enterprise-seat client also needs the product's `enterpriseRead: true`. |
+| Pull new folders into a product clients read | Rerun `Sync-Dossier -Apply`: the rules that hide everything outside `clientRead` are listed from disk, and the doctor fails until they're current. |
+| Clone a client's or product's repos | List them in the entry's `repos`, then `Import-Dossier -Key <key> -Apply` (dry run without `-Apply`). For an enterprise-seat client, run it from your own terminal. |
 | Change personal rules | Edit the `personalRules` file, then run `Sync-Dossier -Apply`. Never edit a home's `CLAUDE.md` directly. |
 | Add an MCP server for one client | Inside that client's session: `claude mcp add --scope user ...` |
 | Move existing repos into a client root | Close every session, IDE and terminal using them, then move with `[IO.Directory]::Move` from your own terminal. See DESIGN.md, "Lessons". |

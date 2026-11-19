@@ -154,9 +154,8 @@ function Read-DsrRepos($Raw, [string] $What) {
 }
 
 function Read-DsrRegistry {
-    # Returns the registry with paths resolved, one Entries list (the firm first, then clients)
-    # and a Templates list. Template roots are also firm roots: templates run in the firm home.
-    # Throws a readable message on any problem.
+    # Returns the registry with paths resolved and one Entries list: the firm first, then
+    # products, then clients. Throws a readable message on any problem.
     $path = Get-DsrRegistryPath
     if (-not (Test-Path -LiteralPath $path)) { throw "no registry at $path (copy dossier.example.json there, or set DOSSIER_CONFIG)" }
     try { $raw = [IO.File]::ReadAllText($path) | ConvertFrom-Json }
@@ -178,30 +177,43 @@ function Read-DsrRegistry {
     $firmRoots = @($hub)
     if ($f.sandboxRoot) { $firmRoots += Resolve-DsrRegistryPath ([string]$f.sandboxRoot) 'firm.sandboxRoot' }
 
-    $templates = New-Object System.Collections.Generic.List[object]
-    foreach ($t in @($raw.templates)) {
-        if ($null -eq $t) { continue }
-        $key = [string]$t.key
-        if ($key -cnotmatch '^[a-z0-9][a-z0-9-]*\z') { throw "template key '$key' must be lowercase letters, digits and -" }
-        if ($key -eq $firmKey) { throw "template key '$key' is the firm's key" }
-        if (@($templates | Where-Object { $_.Key -eq $key }).Count) { throw "template key '$key' appears twice" }
-        if (-not $t.root) { throw "template '$key' has no root" }
-        if ($null -ne $t.enterpriseRead -and $t.enterpriseRead -isnot [bool]) { throw "template '$key' enterpriseRead must be true or false" }
-        $templates.Add([pscustomobject]@{
-            Key = $key; Name = [string]($t.name ?? $key)
-            Root = (Resolve-DsrRegistryPath ([string]$t.root) "template '$key' root")
-            EnterpriseRead = [bool]$t.enterpriseRead
-            Repos = @(Read-DsrRepos $t.repos "template '$key'"); Status = [string]($t.status ?? 'active')
-        })
-    }
-    $firmRoots += @($templates | ForEach-Object Root)
+    if ($null -ne $raw.PSObject.Properties['templates']) { throw "$path has a 'templates' section; templates are now 'products', each with its own home and a clientRead list" }
 
     $entries.Add([pscustomobject]@{
         Key = $firmKey; Name = [string]($f.name ?? 'Firm'); Kind = 'firm'; Seat = 'firm'
         Home = (Get-DsrDefaultHome); Roots = $firmRoots; FormerRoots = @(); HubRoot = $hub
         ExpectEmail = [string]$f.expectEmail; ExpectOrg = [string]$f.expectOrg
-        Contacts = @(); Status = 'active'; BasedOn = @(); Repos = @()
+        Contacts = @(); Status = 'active'; BasedOn = @(); Repos = @(); ClientRead = @(); EnterpriseRead = $false
     })
+
+    foreach ($p in @($raw.products)) {
+        if ($null -eq $p) { continue }
+        $key = [string]$p.key
+        if ($key -cnotmatch '^[a-z0-9][a-z0-9-]*\z') { throw "product key '$key' must be lowercase letters, digits and -" }
+        if ($key -eq $firmKey) { throw "product key '$key' is the firm's key" }
+        if (@($entries | Where-Object { $_.Key -eq $key }).Count) { throw "product key '$key' appears twice" }
+        if (-not $p.root) { throw "product '$key' has no root" }
+        if ($null -ne $p.enterpriseRead -and $p.enterpriseRead -isnot [bool]) { throw "product '$key' enterpriseRead must be true or false" }
+        $homePath = Resolve-DsrRegistryPath ([string]($p.home ?? "~/.claude-homes/$key")) "product '$key' home"
+        if (Test-DsrUnder $homePath (Get-DsrDefaultHome)) { throw "product '$key' home cannot be ~/.claude or inside it; that is the firm home" }
+        $clientRead = @(foreach ($cr in @($p.clientRead)) {
+            if ($null -eq $cr) { continue }
+            $v = ([string]$cr).Trim().Replace('/', '\').Trim('\')
+            if (-not $v -or $v -match '^[A-Za-z]:' -or $v.StartsWith('~') -or $v -match '[*?\[\]]' -or @($v -split '\\' | Where-Object { $_ -in @('', '.', '..') }).Count) {
+                throw "product '$key' clientRead '$cr' must be a plain relative path inside the product root"
+            }
+            $v
+        })
+        $entries.Add([pscustomobject]@{
+            Key = $key; Name = [string]($p.name ?? $key); Kind = 'product'; Seat = 'firm'
+            Home = $homePath; Roots = @(Resolve-DsrRegistryPath ([string]$p.root) "product '$key' root")
+            FormerRoots = @(); HubRoot = $null
+            ExpectEmail = [string]($p.expectEmail ?? $f.expectEmail); ExpectOrg = [string]($p.expectOrg ?? $f.expectOrg)
+            Contacts = @(@($p.contacts) | Where-Object { $_ }); Status = [string]($p.status ?? 'active')
+            BasedOn = @(); Repos = @(Read-DsrRepos $p.repos "product '$key'")
+            ClientRead = $clientRead; EnterpriseRead = [bool]$p.enterpriseRead
+        })
+    }
 
     foreach ($c in @($raw.clients)) {
         if ($null -eq $c) { continue }
@@ -209,9 +221,8 @@ function Read-DsrRegistry {
         if ($key -cnotmatch '^[a-z0-9][a-z0-9-]*\z') { throw "client key '$key' must be lowercase letters, digits and -" }
         if ($key -eq $firmKey) { throw "client key '$key' is the firm's key" }
         if (@($entries | Where-Object { $_.Key -eq $key }).Count) { throw "client key '$key' appears twice" }
-        if (@($templates | Where-Object { $_.Key -eq $key }).Count) { throw "client key '$key' is also a template key" }
         $basedOn = @(@($c.basedOn) | Where-Object { $_ } | ForEach-Object { [string]$_ })
-        foreach ($b in $basedOn) { if (-not @($templates | Where-Object { $_.Key -ceq $b }).Count) { throw "client '$key' basedOn '$b', which is not a template in the registry" } }
+        foreach ($b in $basedOn) { if (-not @($entries | Where-Object { $_.Kind -eq 'product' -and $_.Key -ceq $b }).Count) { throw "client '$key' basedOn '$b', which is not a product in the registry" } }
         if ($c.seat -notin @('enterprise', 'none')) { throw "client '$key' seat must be 'enterprise' or 'none', not '$($c.seat)'" }
         if (-not $c.root) { throw "client '$key' has no root" }
         $homePath = Resolve-DsrRegistryPath ([string]($c.home ?? "~/.claude-homes/$key")) "client '$key' home"
@@ -226,28 +237,26 @@ function Read-DsrRegistry {
             HubRoot = $null
             ExpectEmail = [string]$c.expectEmail; ExpectOrg = [string]$c.expectOrg
             Contacts = @(@($c.contacts) | Where-Object { $_ }); Status = [string]($c.status ?? 'active')
-            BasedOn = $basedOn; Repos = @(Read-DsrRepos $c.repos "client '$key'")
+            BasedOn = $basedOn; Repos = @(Read-DsrRepos $c.repos "client '$key'"); ClientRead = @(); EnterpriseRead = $false
         })
     }
 
     $workspace = Resolve-DsrRegistryPath ([string]$raw.workspaceRoot) 'workspaceRoot'
-    $tplRoots = @($templates | ForEach-Object Root)
-    $all = @(foreach ($e in $entries) { foreach ($r in $e.Roots) { if ($e.Kind -ne 'firm' -or $r -notin $tplRoots) { [pscustomobject]@{ Key = $e.Key; Root = $r } } } }) +
-        @(foreach ($t in $templates) { [pscustomobject]@{ Key = "template '$($t.Key)'"; Root = $t.Root } })
+    $all = @(foreach ($e in $entries) { foreach ($r in $e.Roots) { [pscustomobject]@{ Key = $e.Key; Root = $r } } })
     foreach ($x in $all) {
         foreach ($y in $all) {
             if ($x.Key -ne $y.Key -and (Test-DsrUnder $x.Root $y.Root)) { throw "root $($x.Root) ('$($x.Key)') is inside $($y.Root) ('$($y.Key)'); roots must not nest" }
         }
     }
     foreach ($e in $entries) {
-        if ($e.Kind -eq 'client') {
+        if ($e.Kind -ne 'firm') {
             foreach ($r in $e.Roots) { if ((Test-DsrUnder $e.Home $r) -or (Test-DsrUnder $r $e.Home)) { throw "home of '$($e.Key)' overlaps its own root; a home holds credentials and must sit outside every root" } }
         }
         foreach ($o in $entries) {
             if ($o.Key -eq $e.Key) { continue }
             if ((Test-DsrUnder $e.Home $o.Home) -or (Test-DsrUnder $o.Home $e.Home)) { throw "homes of '$($e.Key)' and '$($o.Key)' overlap; every entry needs its own" }
             foreach ($r in $o.Roots) {
-                if ($e.Kind -eq 'client' -and ((Test-DsrUnder $e.Home $r) -or (Test-DsrUnder $r $e.Home))) { throw "home of '$($e.Key)' overlaps the root of '$($o.Key)'" }
+                if ($e.Kind -ne 'firm' -and ((Test-DsrUnder $e.Home $r) -or (Test-DsrUnder $r $e.Home))) { throw "home of '$($e.Key)' overlaps the root of '$($o.Key)'" }
                 foreach ($fr in $e.FormerRoots) { if (Test-DsrUnder $r $fr) { throw "formerRoots $fr of '$($e.Key)' covers the root of '$($o.Key)'" } }
             }
         }
@@ -260,7 +269,6 @@ function Read-DsrRegistry {
         PersonalRules = if ($raw.personalRules) { Resolve-DsrRegistryPath ([string]$raw.personalRules) 'personalRules' } else { $null }
         SharedSkills  = @(@($raw.sharedSkills) | Where-Object { $_ } | ForEach-Object { [string]$_ })
         Entries       = $entries.ToArray()
-        Templates     = $templates.ToArray()
     }
 }
 
@@ -268,15 +276,54 @@ function Find-DsrEntry($Reg, [string] $Key) {
     return ($Reg.Entries | Where-Object { $_.Key -ieq $Key } | Select-Object -First 1)
 }
 
-function Find-DsrTemplate($Reg, [string] $Key) {
-    return ($Reg.Templates | Where-Object { $_.Key -ieq $Key } | Select-Object -First 1)
+function Get-DsrProducts($Reg) { return @($Reg.Entries | Where-Object Kind -eq 'product') }
+
+function Test-DsrProductReadable($Client, $Product) {
+    # A client may read a product's clientRead paths only if it is based on the product, and an
+    # enterprise-seat client only if the product allows enterprise reads. Only the firm and the
+    # product's own home may edit a product.
+    if ($Client.Kind -ne 'client' -or $Product.Key -cnotin $Client.BasedOn -or -not $Product.ClientRead.Count) { return $false }
+    return ($Client.Seat -eq 'none' -or $Product.EnterpriseRead)
 }
 
-function Test-DsrTemplateReadable($Client, $Template) {
-    # A client may read a template only if it is built from it, and an enterprise-seat client
-    # only if the template allows enterprise reads. Nobody but the firm may edit one.
-    if ($Client.Kind -ne 'client' -or $Template.Key -cnotin $Client.BasedOn) { return $false }
-    return ($Client.Seat -eq 'none' -or $Template.EnterpriseRead)
+function Test-DsrProductBlocked($Client, $Product) {
+    return ($Client.Kind -eq 'client' -and $Product.Key -cin $Client.BasedOn -and $Client.Seat -eq 'enterprise' -and -not $Product.EnterpriseRead)
+}
+
+function Get-DsrClientReadPaths($Product) {
+    return @($Product.ClientRead | ForEach-Object { Join-Path $Product.Roots[0] $_ })
+}
+
+function Get-DsrProductReadDenies($Product) {
+    # Deny rules always beat allow rules, so a client's view of a product is everything under the
+    # root that isn't on, or above, a clientRead path, listed from disk: siblings at each level
+    # down to each clientRead path. A clientRead path or registered repo that doesn't exist yet
+    # is denied at its first missing folder. Anything else added later stays readable until the
+    # next Sync; the doctor catches that as missing deny rules.
+    $root = $Product.Roots[0]
+    $allowed = @(Get-DsrClientReadPaths $Product)
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { return @(@{ Path = $root; IsFile = $false; EditOnly = $false }) }
+    $out = New-Object System.Collections.Generic.List[object]
+    $queue = [Collections.Generic.Queue[string]]::new(); $queue.Enqueue($root)
+    while ($queue.Count) {
+        foreach ($i in @(Get-ChildItem -LiteralPath $queue.Dequeue() -Force -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $p = $i.FullName
+            if (@($allowed | Where-Object { Test-DsrUnder $p $_ }).Count) { continue }
+            if ($i.PSIsContainer -and -not $i.LinkType -and @($allowed | Where-Object { Test-DsrUnder $_ $p }).Count) { $queue.Enqueue($p); continue }
+            $out.Add(@{ Path = $p; IsFile = -not $i.PSIsContainer; EditOnly = $false })
+        }
+    }
+    foreach ($r in $Product.Repos) {
+        $d = Join-Path $root $r.Dir
+        if (-not (Test-Path -LiteralPath $d) -and -not @($allowed | Where-Object { (Test-DsrUnder $_ $d) -or (Test-DsrUnder $d $_) }).Count) { $out.Add(@{ Path = $d; IsFile = $false; EditOnly = $false }) }
+    }
+    foreach ($a in $allowed) {
+        if (Test-Path -LiteralPath $a) { continue }
+        $c = $a
+        while (-not (Test-Path -LiteralPath (Split-Path $c -Parent))) { $c = Split-Path $c -Parent }
+        if (-not @($out | Where-Object { Test-DsrUnder $c $_.Path }).Count) { $out.Add(@{ Path = $c; IsFile = $false; EditOnly = $false }) }
+    }
+    return $out.ToArray()
 }
 
 function Find-DsrFirm($Reg) {
@@ -331,23 +378,30 @@ function Get-DsrExpectText($Entry) { return (@($Entry.ExpectEmail, $Entry.Expect
 
 function Get-DsrDeniedPaths($Reg, $Entry) {
     # What a home must not read or edit, as @{ Path; IsFile; EditOnly }.
-    #   The firm: enterprise-seat client roots, and every client's home.
-    #   A client: every other client's root and home, the hub, the firm home and state file, and
-    #   every template; a template it may read (Test-DsrTemplateReadable) is denied Edit only.
+    #   The firm: enterprise-seat client roots, every client's home, edits to product homes, and
+    #   product logins. It reads products, and their homes' memory, in full.
+    #   A client or product: every other client's and product's root and home, the hub, and the
+    #   firm home and state file. A client reading a product (Test-DsrProductReadable) instead
+    #   gets Edit denied on its root and Read denied on everything outside clientRead.
     $out = New-Object System.Collections.Generic.List[object]
+    function Add([string] $Path, [bool] $IsFile = $false, [bool] $EditOnly = $false) { $out.Add(@{ Path = $Path; IsFile = $IsFile; EditOnly = $EditOnly }) }
     foreach ($e in $Reg.Entries) {
         if ($e.Key -eq $Entry.Key) { continue }
-        if ($e.Kind -eq 'client') {
-            if ($Entry.Kind -eq 'client' -or $e.Seat -eq 'enterprise') { foreach ($r in $e.Roots) { $out.Add(@{ Path = $r; IsFile = $false; EditOnly = $false }) } }
-            $out.Add(@{ Path = $e.Home; IsFile = $false; EditOnly = $false })
+        if ($e.Kind -eq 'firm') {
+            Add $e.HubRoot; Add $e.Home; Add (Get-DsrStateFile $e.Home) $true
+        } elseif ($e.Kind -eq 'client') {
+            if ($Entry.Kind -ne 'firm' -or $e.Seat -eq 'enterprise') { foreach ($r in $e.Roots) { Add $r } }
+            Add $e.Home
+        } elseif ($Entry.Kind -eq 'firm') {
+            Add $e.Home $false $true
+            Add (Join-Path $e.Home '.credentials.json') $true; Add (Get-DsrStateFile $e.Home) $true
         } else {
-            $out.Add(@{ Path = $e.HubRoot; IsFile = $false; EditOnly = $false })
-            $out.Add(@{ Path = $e.Home; IsFile = $false; EditOnly = $false })
-            $out.Add(@{ Path = (Get-DsrStateFile $e.Home); IsFile = $true; EditOnly = $false })
+            Add $e.Home
+            if (Test-DsrProductReadable $Entry $e) {
+                Add $e.Roots[0] $false $true
+                foreach ($d in (Get-DsrProductReadDenies $e)) { $out.Add($d) }
+            } else { Add $e.Roots[0] }
         }
-    }
-    if ($Entry.Kind -eq 'client') {
-        foreach ($t in $Reg.Templates) { $out.Add(@{ Path = $t.Root; IsFile = $false; EditOnly = (Test-DsrTemplateReadable $Entry $t) }) }
     }
     return $out.ToArray()
 }
@@ -362,12 +416,19 @@ function Get-DsrDenyRules($Reg, $Entry) {
 }
 
 function Get-DsrReadableRoots($Reg, $Entry) {
-    # Extra roots a home may read without --add-dir. The firm: no-seat clients and every
-    # template. A client: the templates it may read.
+    # Extra folders a home may read without --add-dir. The firm: no-seat clients, every product
+    # root and every product home's memory. A client: the clientRead paths of products it may
+    # read that exist. A product: none.
     if ($Entry.Kind -eq 'firm') {
-        return @(@($Reg.Entries | Where-Object { $_.Seat -eq 'none' } | ForEach-Object { $_.Roots }) + @($Reg.Templates | ForEach-Object Root))
+        return @(
+            @($Reg.Entries | Where-Object { $_.Seat -eq 'none' } | ForEach-Object { $_.Roots })
+            foreach ($p in (Get-DsrProducts $Reg)) { $p.Roots[0]; Join-Path $p.Home 'projects' }
+        )
     }
-    return @($Reg.Templates | Where-Object { Test-DsrTemplateReadable $Entry $_ } | ForEach-Object Root)
+    if ($Entry.Kind -ne 'client') { return @() }
+    return @(foreach ($p in (Get-DsrProducts $Reg)) {
+        if (Test-DsrProductReadable $Entry $p) { Get-DsrClientReadPaths $p | Where-Object { Test-Path -LiteralPath $_ } }
+    })
 }
 
 function Get-DsrGuardCommand { return 'pwsh -NoProfile -File "' + $script:DsrGuardScript.Replace('\', '/') + '"' }

@@ -4,18 +4,18 @@
 #   pwsh -File Sync-Dossier.ps1 -Apply
 #
 # For every entry it ensures:
-#   - its roots and home exist (template roots are firm roots)
+#   - its roots and home exist
 #   - its home's settings.json has the dossier guard SessionStart hook, the shell guard PreToolUse
-#     hook for Bash and PowerShell, Read/Edit deny rules for
-#     what it must not see (Get-DsrDeniedPaths: the firm denies enterprise-seat roots and every
-#     client home; a client denies other clients' roots and homes, the hub, ~/.claude,
-#     ~/.claude.json and every template, Edit only for the templates it may read), and
-#     additionalDirectories (Get-DsrReadableRoots). Only rules this script added before (tracked
-#     in <home>\dossier.managed.json) are ever removed.
+#     hook for Bash and PowerShell, Read/Edit deny rules for what it must not see
+#     (Get-DsrDeniedPaths), and additionalDirectories (Get-DsrReadableRoots). A client based on a
+#     product gets Read denied on everything in the product outside clientRead, listed from
+#     disk, so rerun Sync after a product's folders change. Only rules this script added before
+#     (tracked in <home>\dossier.managed.json) are ever removed.
 #   - its home's CLAUDE.md is the personal rules file, if the registry names one. A CLAUDE.md
 #     this script didn't write is left alone and reported.
-#   - client homes link the registry's sharedSkills from ~/.claude\skills, and nothing else.
-# Plus the hub CLAUDE.md (generated section only) and a CLAUDE.md stub in each client and template
+#   - client and product homes link the registry's sharedSkills from ~/.claude\skills, and
+#     nothing else.
+# Plus the hub CLAUDE.md (generated section only) and a CLAUDE.md stub in each client and product
 # root that lacks one. Close Claude Code sessions in a home before applying to it.
 
 param([switch] $Apply)
@@ -42,20 +42,21 @@ function Write-TextFile([string] $Path, [string] $Text) {
 function Expand-Template([string] $Name, $Entry) {
     $t = [IO.File]::ReadAllText((Join-Path $templates $Name))
     if ($Entry) {
-        $t = $t.Replace('{{name}}', $Entry.Name).Replace('{{key}}', $Entry.Key)
-        if ($Entry.PSObject.Properties['Seat']) {
-            $t = $t.Replace('{{seat}}', $Entry.Seat).Replace('{{home}}', $Entry.Home).Replace('{{expectEmail}}', (Get-DsrExpectText $Entry))
-            $t = $t.Replace('{{templates}}', (Get-ClientTemplatesSection $Entry))
-        }
+        $t = $t.Replace('{{name}}', $Entry.Name).Replace('{{key}}', $Entry.Key).Replace('{{seat}}', $Entry.Seat)
+        $t = $t.Replace('{{home}}', $Entry.Home).Replace('{{expectEmail}}', (Get-DsrExpectText $Entry))
+        $t = $t.Replace('{{products}}', (Get-ClientProductsSection $Entry))
     }
     return $t
 }
 
-function Get-ClientTemplatesSection($Entry) {
-    $readable = @($reg.Templates | Where-Object { Test-DsrTemplateReadable $Entry $_ })
-    if (-not $readable.Count) { return '' }
-    $list = ($readable | ForEach-Object { "- $($_.Name): ``$($_.Root)``" }) -join "`n"
-    return "## Templates`n`nBuilt from these firm templates. Read them for conventions; this home can't edit them.`n`n$list`n`nIf something here looks worth promoting back into a template, describe it to the user as a candidate and stop. Never copy this client's code, memory or tickets toward a template.`n`n"
+function Get-ClientProductsSection($Entry) {
+    $based = @(Get-DsrProducts $reg | Where-Object { $_.Key -cin $Entry.BasedOn })
+    if (-not $based.Count) { return '' }
+    $list = ($based | ForEach-Object {
+        $paths = if (Test-DsrProductReadable $Entry $_) { (Get-DsrClientReadPaths $_ | ForEach-Object { "``$_``" }) -join ', ' } else { 'nothing readable from this home yet' }
+        "- $($_.Name): $paths"
+    }) -join "`n"
+    return "## Products`n`nBuilt on these firm products. Only the paths listed are readable from this home, and none are editable.`n`n$list`n`nIf something here looks worth promoting back into a product, describe it to the user as a candidate and stop. Never copy this client's code, memory or tickets toward a product.`n`n"
 }
 
 function Ensure-Dir([string] $Path) {
@@ -126,7 +127,7 @@ function Sync-HomeClaudeMd($Entry) {
 }
 
 function Sync-SharedSkills($Entry) {
-    if ($Entry.Kind -ne 'client') { return }
+    if ($Entry.Kind -eq 'firm') { return }
     $src = Join-Path (Get-DsrDefaultHome) 'skills'
     $dst = Join-Path $Entry.Home 'skills'
     foreach ($name in $reg.SharedSkills) {
@@ -152,12 +153,14 @@ function Sync-HubClaudeMd {
         $access = if ($e.Seat -eq 'enterprise') { 'metadata only' } else { 'read code' }
         $rows += "| $($e.Key) | $($e.Name) | $($e.Seat) | ``$($e.Roots[0])`` | ``$($e.Home)`` | $(Get-DsrExpectText $e) | $access | $($e.Contacts -join '; ') | $($e.Status) |"
     }
-    if ($reg.Templates.Count) {
-        $rows += @('', '## Templates', '', 'Firm-owned base repos, in the firm home. Clients read only the ones they are based on, and never edit them.', '')
-        $rows += @('| Key | Template | Root | Enterprise read | Based on by | Status |', '|---|---|---|---|---|---|')
-        foreach ($t in $reg.Templates) {
-            $users = @($reg.Entries | Where-Object { $t.Key -cin $_.BasedOn } | ForEach-Object { if (Test-DsrTemplateReadable $_ $t) { $_.Key } else { "$($_.Key) (blocked: enterprise)" } })
-            $rows += "| $($t.Key) | $($t.Name) | ``$($t.Root)`` | $(if ($t.EnterpriseRead) { 'yes' } else { 'no' }) | $($users -join ', ') | $($t.Status) |"
+    $products = @(Get-DsrProducts $reg)
+    if ($products.Count) {
+        $rows += @('', '## Products', '', 'Firm-owned products, each with its own home. The hub reads and edits them and reads their memory. Clients based on one read only its clientRead paths, and never edit it.', '')
+        $rows += @('| Key | Product | Root | Home | Login | Client read | Enterprise read | Based on by | Status |', '|---|---|---|---|---|---|---|---|---|')
+        foreach ($p in $products) {
+            $users = @($reg.Entries | Where-Object { $p.Key -cin $_.BasedOn } | ForEach-Object { if (Test-DsrProductBlocked $_ $p) { "$($_.Key) (blocked: enterprise)" } else { $_.Key } })
+            $read = if ($p.ClientRead.Count) { ($p.ClientRead | ForEach-Object { "``$_``" }) -join ', ' } else { 'nothing' }
+            $rows += "| $($p.Key) | $($p.Name) | ``$($p.Roots[0])`` | ``$($p.Home)`` | $(Get-DsrExpectText $p) | $read | $(if ($p.EnterpriseRead) { 'yes' } else { 'no' }) | $($users -join ', ') | $($p.Status) |"
         }
     }
     $begin = '<!-- BEGIN GENERATED: Sync-Dossier -->'; $end = '<!-- END GENERATED -->'
@@ -176,17 +179,14 @@ foreach ($e in $reg.Entries) {
     Sync-Settings $e
     Sync-HomeClaudeMd $e
     Sync-SharedSkills $e
-    if ($e.Kind -eq 'client') {
+    if ($e.Kind -ne 'firm') {
         $md = Join-Path $e.Roots[0] 'CLAUDE.md'
-        if (-not (Test-Path -LiteralPath $md)) { $t = Expand-Template 'client.CLAUDE.md' $e; Step "create $md from template" { Write-TextFile $md $t } }
+        if (-not (Test-Path -LiteralPath $md)) { $t = Expand-Template "$($e.Kind).CLAUDE.md" $e; Step "create $md from template" { Write-TextFile $md $t } }
     }
-}
-foreach ($t in $reg.Templates) {
-    Write-Host "[template $($t.Key)] firm home"
-    $md = Join-Path $t.Root 'CLAUDE.md'
-    if (-not (Test-Path -LiteralPath $md)) { $x = Expand-Template 'template.CLAUDE.md' $t; Step "create $md from template" { Write-TextFile $md $x } }
-    foreach ($c in @($reg.Entries | Where-Object { $t.Key -cin $_.BasedOn -and -not (Test-DsrTemplateReadable $_ $t) })) {
-        Write-Host "  warn  '$($c.Key)' is based on '$($t.Key)', but it is an enterprise seat and the template doesn't set enterpriseRead; it gets no access"
+    if ($e.Kind -eq 'product') {
+        foreach ($c in @($reg.Entries | Where-Object { Test-DsrProductBlocked $_ $e })) {
+            Write-Host "  warn  '$($c.Key)' is based on '$($e.Key)', but it is an enterprise seat and the product doesn't set enterpriseRead; it gets no access"
+        }
     }
 }
 Write-Host '[hub]'
@@ -194,6 +194,6 @@ Sync-HubClaudeMd
 
 if ($script:changes -eq 0) { Write-Host 'In sync.' }
 elseif (-not $Apply) { Write-Host "$($script:changes) change(s) planned. Run with -Apply." }
-foreach ($e in @($reg.Entries | Where-Object Kind -eq 'client')) {
+foreach ($e in @($reg.Entries | Where-Object Kind -ne 'firm')) {
     if ($Apply -and (Read-DsrIdentity $e.Home).Status -ne 'ok') { Write-Host "Next for '$($e.Key)': cc -a $($e.Key), then /login as $(Get-DsrExpectText $e)." }
 }

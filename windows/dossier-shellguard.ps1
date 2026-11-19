@@ -10,7 +10,7 @@
 #     WSL form, through ~, $HOME, $env:USERPROFILE or %USERPROFILE%
 #   - has a wildcard whose fixed part is a folder holding a denied path
 #   - searches or copies recursively from a folder holding a denied path
-# A path with an Edit rule and no Read rule (a template a client may read) only stops commands
+# A path with an Edit rule and no Read rule (a product path a client may read) only stops commands
 # that look like writes and name it, or run from inside it.
 # Its own failures let the command through, with a note.
 
@@ -69,7 +69,7 @@ try {
 
     if (Test-Path -LiteralPath $cwd) { Set-Location -LiteralPath $cwd }
 
-    # Edit-only paths (a template a client may read) stop commands that look like writes.
+    # Edit-only paths (a product path a client may read) stop commands that look like writes.
     $writes = '(?i)(^|[\s;|&(])((Set-Content|Add-Content|Out-File|New-Item|Remove-Item|Move-Item|Copy-Item|Rename-Item|Clear-Content|ni|rm|rmdir|del|mv|cp|mkdir|touch|tee|truncate|ln|patch|git\s+(-C\s+\S+\s+)?(add|commit|push|pull|merge|rebase|reset|checkout|switch|restore|clean|apply|am|stash|cherry-pick|revert|rm|mv|init|clone))(?=\s|$)|sed\s+[^;|&]*-i)|(?<![0-9])>(?!&)'
     if ($editOnly.Count -and $text -match $writes) {
         $here = Resolve-DsrPath $cwd
