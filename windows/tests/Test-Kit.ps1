@@ -325,6 +325,12 @@ try {
         Clear-Stub
         $r = RunExe $gitBash @('-c', 'source "$1"; claude -p hi', '_', $dossierBash) "$ws\clients\widgetco"
         Check 'bash: claude routes to the folder''s home' ($r.Code -eq 7 -and (Stub) -like "dir=$tmp\.claude-homes\widgetco|*") "$($r.Err) $(Stub)"
+        Clear-Stub
+        $r = RunExe $gitBash @('-c', 'source "$1"; bash -c "$(declare -f cc claude); claude -p hi"', '_', $dossierBash) "$ws\clients\widgetco"
+        Check 'bash: claude works when only its functions are carried over' ($r.Code -eq 7 -and (Stub) -like "dir=$tmp\.claude-homes\widgetco|*") "$($r.Err) $(Stub)"
+        Clear-Stub
+        $r = RunExe $gitBash @('-c', 'cd "$(dirname "$1")"; source ./dossier.bash; cd "$2"; claude -p hi', '_', $dossierBash, "$ws\clients\widgetco".Replace('\', '/')) $tmp
+        Check 'bash: relative source then cd still finds the launcher' ($r.Code -eq 7 -and (Stub) -like "dir=$tmp\.claude-homes\widgetco|*") "$($r.Err) $(Stub)"
     } else { Check 'bash: Git Bash found' $false }
     $env:PATH = $saved['PATH']
     Remove-Item Env:\CLAUDE_CODE_CHILD_SESSION, Env:\CLAUDE_BIN, Env:\CLAUDE_CODE_GIT_BASH_PATH
