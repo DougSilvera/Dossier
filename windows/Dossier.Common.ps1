@@ -12,6 +12,10 @@ $script:DsrRoles = @('lead', 'builder', 'reviewer', 'researcher', 'ops', 'hr')
 # user's own configuration and must reach the child untouched.
 $script:DsrSessionVars = '^(CLAUDECODE|CLAUDE_CONFIG_DIR|CLAUDE_PID|CLAUDE_CODE_(CHILD_SESSION|ENTRYPOINT|SESSION_ID|SESSION_ATTENDED|SSE_PORT|MESSAGING_SOCKET|MESSAGING_TOKEN|OAUTH_TOKEN))$'
 
+# CLAUDECODE is set in every process a Claude Code session starts. A process that clears it, or
+# one started outside the session (Explorer, Task Scheduler) on the session's behalf, isn't seen.
+function Test-DsrInsideClaude { return [bool]$env:CLAUDECODE }
+
 function Test-DsrPowerShell7 { return ($PSVersionTable.PSVersion.Major -ge 7) }
 
 function Write-DsrErr([string] $Message) { [Console]::Error.WriteLine($Message) }

@@ -85,7 +85,7 @@ try {
 
     # A session that starts another home gets that home's output back, so an enterprise client's
     # data would cross accounts in either direction.
-    if ($env:CLAUDECODE) {
+    if (Test-DsrInsideClaude) {
         $callerHome = if ($env:CLAUDE_CONFIG_DIR) { Resolve-DsrRealPath $env:CLAUDE_CONFIG_DIR } else { Get-DsrDefaultHome }
         $caller = Find-DsrEntryByHome $reg $callerHome
         if (-not (Test-DsrSamePath $callerHome $entry.Home) -and ($entry.Seat -eq 'enterprise' -or ($caller -and $caller.Seat -eq 'enterprise'))) {

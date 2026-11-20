@@ -27,7 +27,7 @@ if (-not $entry -or $entry.Kind -eq 'firm') {
 }
 $root = $entry.Roots[0]; $repos = $entry.Repos
 $what = if ($entry.Kind -eq 'product') { "product '$($entry.Key)'" } else { "client '$($entry.Key)' ($($entry.Seat) seat)" }
-if ($entry.Seat -eq 'enterprise' -and $env:CLAUDECODE) {
+if ($entry.Seat -eq 'enterprise' -and (Test-DsrInsideClaude)) {
     Write-DsrErr "Refused: '$($entry.Key)' is an enterprise seat, and this is a Claude session. Run Import-Dossier from your own terminal."
     exit 1
 }
@@ -36,7 +36,7 @@ if (-not @($repos).Count) { Write-DsrErr "$what has no repos in the registry. Ad
 Write-Host "Import $what into $root$(if (-not $Apply) { '  (dry run; -Apply to make changes)' })"
 Write-Host '-- Sync-Dossier'
 & "$PSScriptRoot\Sync-Dossier.ps1" -Apply:$Apply
-if ($LASTEXITCODE) { Write-DsrErr 'Sync-Dossier failed; nothing cloned.'; exit 1 }
+if ($LASTEXITCODE -and $LASTEXITCODE -ne 2) { Write-DsrErr 'Sync-Dossier failed; nothing cloned.'; exit 1 }
 
 Write-Host '-- repos'
 $failed = 0

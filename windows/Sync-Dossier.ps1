@@ -19,6 +19,10 @@
 #     nothing else.
 # Plus the hub CLAUDE.md (generated section only) and a CLAUDE.md stub in each client and product
 # root that lacks one. Close Claude Code sessions in a home before applying to it.
+#
+# Inside a Claude session (Test-DsrInsideClaude) nothing is written into an enterprise-seat
+# entry's home or root: those steps print as skipped, and Sync exits 2. Run it from your own
+# terminal to apply them.
 
 param([switch] $Apply)
 $ErrorActionPreference = 'Stop'
@@ -28,8 +32,12 @@ if (-not (Test-DsrPowerShell7)) { Write-DsrErr 'Sync-Dossier needs PowerShell 7 
 try { $reg = Read-DsrRegistry } catch { Write-DsrErr $_.Exception.Message; exit 1 }
 $templates = Join-Path (Split-Path $PSScriptRoot -Parent) 'templates'
 $script:changes = 0
+$script:inside = Test-DsrInsideClaude
+$script:blocked = $false
+$script:skipped = @()
 
 function Step([string] $What, [scriptblock] $Do) {
+    if ($script:blocked) { $script:skipped += $script:entryKey; Write-Host "  skip  $What (enterprise seat, Claude session)"; return }
     $script:changes++
     if ($Apply) { & $Do; Write-Host "  done  $What" } else { Write-Host "  plan  $What" }
 }
@@ -88,7 +96,7 @@ function Sync-ProductStatus($Entry) {
     }
     # Working this out reads the client's repos; for an enterprise seat that happens only outside
     # a Claude session.
-    if ($Entry.Seat -eq 'enterprise' -and $env:CLAUDECODE) { Write-Host "  skip  product status for '$($Entry.Key)': an enterprise client's repos are read only from your own terminal"; return }
+    if ($Entry.Seat -eq 'enterprise' -and $script:inside) { $script:skipped += $Entry.Key; Write-Host "  skip  product status for '$($Entry.Key)': an enterprise client's repos are read only from your own terminal"; return }
     $data = @(Get-DsrProductStatus $reg $Entry)
     $script:status[$Entry.Key] = $data
     $text = [ordered]@{ syncedAt = (Get-Date -Format 'yyyy-MM-dd HH:mm'); products = $data } | ConvertTo-Json -Depth 10
@@ -302,9 +310,11 @@ function Sync-HubClaudeMd {
 Write-Host "Registry: $($reg.Path)$(if (-not $Apply) { '  (dry run; -Apply to make changes)' })"
 foreach ($e in $reg.Entries) {
     Write-Host "[$($e.Key)] home $($e.Home)"
+    $script:entryKey = $e.Key
+    $script:blocked = $e.Seat -eq 'enterprise' -and $script:inside
     foreach ($r in $e.Roots) { Ensure-Dir $r }
     Ensure-Dir $e.Home
-    if (-not $Apply -and -not (Test-Path -LiteralPath $e.Home)) { Write-Host "  plan  (settings and CLAUDE.md for the new home)"; continue }
+    if ((-not $Apply -or $script:blocked) -and -not (Test-Path -LiteralPath $e.Home)) { Write-Host "  $(if ($script:blocked) { 'skip' } else { 'plan' })  (settings and CLAUDE.md for the new home)"; continue }
     Sync-Settings $e
     Sync-HomeClaudeMd $e
     Sync-SharedSkills $e
@@ -324,11 +334,16 @@ foreach ($e in $reg.Entries) {
         }
     }
 }
+$script:blocked = $false
 Write-Host '[hub]'
 Sync-HubClaudeMd
 
-if ($script:changes -eq 0) { Write-Host 'In sync.' }
-elseif (-not $Apply) { Write-Host "$($script:changes) change(s) planned. Run with -Apply." }
+if ($script:changes -eq 0 -and -not $script:skipped.Count) { Write-Host 'In sync.' }
+elseif ($script:changes -and -not $Apply) { Write-Host "$($script:changes) change(s) planned. Run with -Apply." }
 foreach ($e in @($reg.Entries | Where-Object Kind -ne 'firm')) {
     if ($Apply -and (Read-DsrIdentity $e.Home).Status -ne 'ok') { Write-Host "Next for '$($e.Key)': cc -a $($e.Key), then /login as $(Get-DsrExpectText $e)." }
+}
+if ($script:skipped.Count) {
+    Write-Host "$($script:skipped.Count) change(s) skipped for $((@($script:skipped | Select-Object -Unique)) -join ', '): enterprise homes aren't written from a Claude session. Run Sync-Dossier from your own terminal."
+    exit 2
 }

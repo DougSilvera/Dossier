@@ -31,6 +31,7 @@ At session start, `dossier-guard` stays silent when the home matches the folder.
    pwsh -NoProfile -File windows\Sync-Dossier.ps1
    pwsh -NoProfile -File windows\Sync-Dossier.ps1 -Apply
    ```
+   Run Sync from your own terminal. Inside a Claude session it writes nothing into an enterprise client's home or root: it lists those steps as skipped and exits 2.
 4. Load `cc`: add `. <repo>\windows\Dossier.ps1` to `$PROFILE`, and `source <repo>/dossier.bash` to `~/.bashrc` for Git Bash.
 5. Log in to each client home: `cc -a <key>`, then `/login` as the account the registry expects.
 6. Check: `pwsh -NoProfile -File windows\Test-Dossier.ps1` should print `No FAIL.`
