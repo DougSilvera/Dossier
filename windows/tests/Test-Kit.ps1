@@ -393,9 +393,10 @@ try {
     $env:DOSSIER_CONFIG = Join-Path $tmp '.dossier.json'
 
     # --- shell guard
-    function Shell([string] $Command, [string] $Cwd, [string] $ConfigDir) {
+    function Shell([string] $Command, [string] $Cwd, [string] $ConfigDir, [string] $Root = $ws) {
         if ($ConfigDir) { $env:CLAUDE_CONFIG_DIR = $ConfigDir } elseif (Test-Path Env:\CLAUDE_CONFIG_DIR) { Remove-Item Env:\CLAUDE_CONFIG_DIR }
-        $r = Run 'dossier-shellguard.ps1' @() $tmp (@{ tool_name = 'PowerShell'; tool_input = @{ command = $Command }; cwd = $Cwd } | ConvertTo-Json)
+        $rootArgs = if ($Root) { @('-WorkspaceRoot', $Root) } else { @() }
+        $r = Run 'dossier-shellguard.ps1' $rootArgs $tmp (@{ tool_name = 'PowerShell'; tool_input = @{ command = $Command }; cwd = $Cwd } | ConvertTo-Json)
         if (Test-Path Env:\CLAUDE_CONFIG_DIR) { Remove-Item Env:\CLAUDE_CONFIG_DIR }
         return $r
     }
@@ -430,6 +431,150 @@ try {
     Check 'shell guard: a client reads its own root' ($r.Out -eq '') $r.Out
     $r = Shell "cat $ws\anything" $ws "$tmp\no-such-home"
     Check 'shell guard: a home without settings lets commands through' ($r.Code -eq 0 -and $r.Out -eq '') $r.Out
+
+    # deletes: silent inside the workspace, ask outside it or when a target is unknown, deny still wins
+    $hubDir = "$ws\hub"
+    $wsPosix = '/' + $ws.Substring(0, 1).ToLower() + $ws.Substring(2).Replace('\', '/')
+    $outside = "$tmp\elsewhere"; $outPosix = '/' + $outside.Substring(0, 1).ToLower() + $outside.Substring(2).Replace('\', '/')
+    $tempDir = [IO.Path]::GetTempPath().TrimEnd('\')
+    $drive = if ($ws.Substring(0, 1) -eq 'D') { 'E' } else { 'D' }
+    $deleteCases = @(
+        @{ n = 'rm inside'; c = 'rm -rf build'; want = 'allow' }
+        @{ n = 'rm with a redirect inside'; c = 'rm -f x 2>/dev/null'; want = 'allow' }
+        @{ n = 'Remove-Item inside, absolute'; c = "Remove-Item -Recurse -Force $hubDir\x -ErrorAction SilentlyContinue"; want = 'allow' }
+        @{ n = 'rm inside through ~'; c = 'rm -rf ~/workspace/hub/x'; want = 'allow' }
+        @{ n = 'rm inside, Git Bash path'; c = "rm -rf $wsPosix/hub/x"; want = 'allow' }
+        @{ n = 'rm inside, wildcard'; c = 'rm -f *.log'; want = 'allow' }
+        @{ n = 'rm in ~/.claude'; c = 'rm -rf ~/.claude/x'; want = 'ask' }
+        @{ n = 'Remove-Item in %TEMP%'; c = "Remove-Item -Recurse $tempDir\dossier-other"; want = 'ask' }
+        @{ n = 'del through %TEMP%'; c = 'del %TEMP%\x'; want = 'ask' }
+        @{ n = 'rm on another drive'; c = "rm -rf ${drive}:\x"; want = 'ask' }
+        @{ n = 'rm on another drive, Git Bash path'; c = "rm -rf /$($drive.ToLower())/x"; want = 'ask' }
+        @{ n = 'mixed targets'; c = 'rm a ~/.claude/x'; want = 'ask' }
+        @{ n = 'a variable target'; c = 'rm -rf $dir'; want = 'ask' }
+        @{ n = 'an $env: target'; c = 'Remove-Item $env:TEMP\x'; want = 'ask' }
+        @{ n = 'a command-output target'; c = 'rm `cat list`'; want = 'ask' }
+        @{ n = 'a subexpression target'; c = 'Remove-Item (Get-Content list.txt)'; want = 'ask' }
+        @{ n = 'a pipe into Remove-Item'; c = 'Get-ChildItem x | Remove-Item'; want = 'ask' }
+        @{ n = 'xargs rm'; c = 'git ls-files -z | xargs -0 rm -f'; want = 'ask' }
+        @{ n = 'git rm in a workspace repo'; c = 'git rm -r --cached x'; want = 'allow' }
+        @{ n = 'git clean in a workspace repo'; c = 'git clean -fdx'; want = 'allow' }
+        @{ n = 'git clean in a repo outside'; c = 'git clean -fdx'; d = $outside; want = 'ask' }
+        @{ n = 'git -C a repo outside'; c = "git -C $outside rm x"; want = 'ask' }
+        @{ n = 'find -delete inside'; c = 'find . -name ''*.tmp'' -delete'; want = 'allow' }
+        @{ n = 'find -delete outside'; c = "find $outPosix -name x -delete"; want = 'ask' }
+        @{ n = 'find -exec rm inside'; c = 'find . -name x -exec rm {} +'; want = 'allow' }
+        @{ n = '.Delete( inside'; c = "[IO.File]::Delete('$hubDir\x')"; want = 'allow' }
+        @{ n = '.Delete( outside'; c = "[IO.Directory]::Delete('$outside', `$true)"; want = 'ask' }
+        @{ n = '.Delete( on an object'; c = '(Get-Item x).Delete()'; want = 'ask' }
+        @{ n = 'cmd /c del inside'; c = 'cmd /c del /q x'; want = 'allow' }
+        @{ n = 'cmd /c rd outside'; c = "cmd /c `"rd /s /q $outside`""; want = 'ask' }
+        @{ n = 'ri inside'; c = 'ri x'; want = 'allow' }
+        @{ n = 'erase outside'; c = "erase $outside\x"; want = 'ask' }
+        @{ n = 'unlink outside'; c = "unlink $outPosix/x"; want = 'ask' }
+        @{ n = 'shred outside'; c = "shred -u $outside\x"; want = 'ask' }
+        @{ n = 'a quoted bash -c delete outside'; c = "bash -c `"rm -rf $outPosix`""; want = 'ask' }
+        @{ n = 'a relative delete from a folder outside'; c = 'rm x'; d = $outside; want = 'ask' }
+        @{ n = 'a non-delete command'; c = 'git status'; d = $outside; want = 'allow' }
+        @{ n = 'a search for delete text'; c = 'rg "rm -rf" docs; echo del'; d = $outside; want = 'allow' }
+        @{ n = 'cd outside, then rm'; c = "cd $outPosix && rm -rf x"; want = 'ask' }
+        @{ n = 'Set-Location outside, then Remove-Item'; c = "Set-Location $outside; Remove-Item -Recurse y"; want = 'ask' }
+        @{ n = 'pushd outside, then Remove-Item'; c = "pushd $outside; Remove-Item -Recurse y"; want = 'ask' }
+        @{ n = 'cd outside inside bash -c'; c = "bash -c `"cd $outPosix && rm -rf y`""; want = 'ask' }
+        @{ n = 'Set-Location outside inside pwsh -c'; c = "pwsh -c `"Set-Location $outside; Remove-Item -Recurse y`""; want = 'ask' }
+        @{ n = 'cmd cd /d outside, then del'; c = "cd /d $outside && del x"; want = 'ask' }
+        @{ n = 'cd -, then rm'; c = 'cd - && rm x'; want = 'ask' }
+        @{ n = 'cd to a variable, then rm'; c = 'cd $x; rm y'; want = 'ask' }
+        @{ n = 'popd, then rm'; c = 'popd; rm y'; want = 'ask' }
+        @{ n = 'cd inside, then rm'; c = 'cd ~/workspace/hub/sub && rm -rf x'; want = 'allow' }
+        @{ n = 'cd outside, then rm with an absolute path inside'; c = "cd $outPosix && rm -rf $hubDir\x"; want = 'allow' }
+        @{ n = 'Remove-Item -LiteralPath: outside'; c = "Remove-Item -LiteralPath:$outside -Recurse"; want = 'ask' }
+        @{ n = 'Remove-Item -Path: outside'; c = "Remove-Item -Path:$outside -Recurse"; want = 'ask' }
+        @{ n = 'Remove-Item -LiteralPath: inside'; c = "Remove-Item -LiteralPath:$hubDir\x -Recurse:`$true"; want = 'allow' }
+        @{ n = 'module-qualified Remove-Item outside'; c = "Microsoft.PowerShell.Management\Remove-Item $outside -Recurse"; want = 'ask' }
+        @{ n = 'Remove-Item called by name outside'; c = "& 'Remove-Item' $outside"; want = 'ask' }
+        @{ n = 'rm by full path outside'; c = "/usr/bin/rm -rf $outPosix"; want = 'ask' }
+        @{ n = '\rm outside'; c = "\rm -rf $outPosix"; want = 'ask' }
+        @{ n = 'a quoted rm.exe path outside'; c = "`"C:/Program Files/Git/usr/bin/rm.exe`" -rf $outPosix"; want = 'ask' }
+        @{ n = 'git --work-tree= outside'; c = "git --work-tree=$outPosix clean -fdx"; want = 'ask' }
+        @{ n = 'git --work-tree outside, space-separated'; c = "git --work-tree $outPosix clean -fdx"; want = 'ask' }
+        @{ n = 'git --git-dir= elsewhere, then a relative path'; c = "git --git-dir=$outPosix/.git rm x"; want = 'ask' }
+        @{ n = 'GIT_WORK_TREE= before git clean'; c = "GIT_WORK_TREE=$outPosix git clean -fdx"; want = 'ask' }
+        @{ n = 'git --work-tree= inside'; c = "git --work-tree=$wsPosix/hub clean -fdx"; want = 'allow' }
+        @{ n = 'a //c/ path is UNC'; c = "rm -rf /$wsPosix/hub/x"; want = 'ask' }
+        @{ n = '~- is not resolved'; c = 'rm -rf ~-/x'; want = 'ask' }
+        @{ n = '~+ is not resolved'; c = 'rm -rf ~+/x'; want = 'ask' }
+        @{ n = '~user is not resolved'; c = 'rm -rf ~someone/x'; want = 'ask' }
+        @{ n = 'echo rm outside'; c = "echo rm -rf $outPosix"; want = 'allow' }
+        @{ n = 'Write-Output of a delete'; c = "Write-Output `"rm -rf $outPosix`""; want = 'allow' }
+        @{ n = 'echo rm piped into sh'; c = "echo rm -rf $outPosix | sh"; want = 'ask' }
+        @{ n = 'echo `rm` runs it'; c = "echo ``rm -rf $outPosix``"; want = 'ask' }
+        @{ n = 'an echoed cd does not move the folder'; c = "cd $outPosix; echo cd ~/workspace/hub; rm x"; want = 'ask' }
+        @{ n = 'Remove-Item inside a script block'; c = "if (`$true) { Remove-Item -Recurse $outside }"; want = 'ask' }
+        @{ n = 'Remove-Item in ForEach-Object'; c = "Get-ChildItem | ForEach-Object { Remove-Item $outside }"; want = 'ask' }
+        @{ n = '$null = Remove-Item of a folder holding a denied root'; c = "`$null = Remove-Item -Recurse -Force $ws\clients"; want = 'deny' }
+        @{ n = 'timeout before rm of a folder holding a denied root'; c = 'timeout 60 rm -rf ~/workspace/clients'; want = 'deny' }
+        @{ n = 'cmd if exist ... rd of a folder holding a denied root'; c = "cmd /c `"if exist $ws\clients rd /s /q $ws\clients`""; want = 'deny' }
+        @{ n = '$r = Remove-Item outside'; c = "`$r = Remove-Item $outside -Recurse"; want = 'ask' }
+        @{ n = 'nice rm outside'; c = "nice rm -rf $outPosix"; want = 'ask' }
+        @{ n = 'wsl rm outside'; c = "wsl rm -rf /mnt$outPosix"; want = 'ask' }
+        @{ n = 'cmd call del outside'; c = "cmd /c call del /q $outside\x"; want = 'ask' }
+        @{ n = 'rm then npm ci inside'; c = 'rm -rf build && npm ci'; want = 'allow' }
+        @{ n = 'Remove-Item of a comma list inside'; c = 'Remove-Item -Recurse -Force .\bin, .\obj'; want = 'allow' }
+        @{ n = 'a commit message naming rm'; c = 'git commit -m "rm old files"'; want = 'allow' }
+        @{ n = 'grep for rm -rf'; c = 'grep -rn "rm -rf" .'; want = 'allow' }
+        @{ n = 'rg --pre rm outside'; c = "rg --pre rm x $outPosix"; want = 'ask' }
+        @{ n = 'rg --pre=rm outside'; c = "rg --pre=rm x $outPosix"; want = 'ask' }
+        @{ n = 'rg --pre="rm" outside'; c = "rg --pre=`"rm`" x $outPosix"; want = 'ask' }
+        @{ n = 'rg --pre=''rm'' outside'; c = "rg --pre='rm' x $outPosix"; want = 'ask' }
+        @{ n = 'rg --pre "rm" outside'; c = "rg --pre `"rm`" x $outPosix"; want = 'ask' }
+        @{ n = 'rg --pre rm over a folder holding a denied root'; c = 'rg --pre rm x ~/workspace/clients'; want = 'deny' }
+        @{ n = 'rg --pre rm inside'; c = 'rg --pre rm x .'; want = 'allow' }
+        @{ n = 'rg --pre with another program outside'; c = "rg --pre pdftotext x $outPosix"; want = 'allow' }
+        @{ n = 'echo of a quoted $( ) delete of a denied holder'; c = 'echo "$(rm -rf ~/workspace/clients)"'; want = 'deny' }
+        @{ n = 'echo of a quoted $( ) delete outside'; c = "echo `"`$(rm -rf $outPosix)`""; want = 'ask' }
+        @{ n = 'echo of a quoted backtick delete outside'; c = "echo `"``rm -rf $outPosix```""; want = 'ask' }
+        @{ n = 'Write-Host of a quoted $( ) Remove-Item outside'; c = "Write-Host `"`$(Remove-Item -Recurse $outside)`""; want = 'ask' }
+        @{ n = 'cd.. then a delete of the folder holding a denied root'; c = 'cd..; Remove-Item -Recurse -Force .'; d = "$ws\clients\widgetco"; want = 'deny' }
+        @{ n = 'cd.. out of the workspace, then Remove-Item'; c = 'cd..; Remove-Item -Recurse .ssh'; d = $ws; want = 'ask' }
+        @{ n = 'cd\ then Remove-Item'; c = 'cd\; Remove-Item -Recurse Windows\Temp\x'; want = 'ask' }
+        @{ n = 'cd.. inside, then Remove-Item'; c = 'cd..; Remove-Item -Recurse x'; d = "$hubDir\sub"; want = 'allow' }
+        @{ n = 'Remove-Item on the registry'; c = 'Remove-Item -Recurse HKCU:\Software\Foo'; want = 'ask' }
+        @{ n = 'Remove-Item on Env:'; c = 'Remove-Item Env:\FOO'; want = 'ask' }
+        @{ n = 'find -L outside'; c = "find -L $outPosix -delete"; want = 'ask' }
+        @{ n = 'find -H outside with -exec rm'; c = "find -H $outPosix -name x -exec rm {} +"; want = 'ask' }
+        @{ n = 'find -D and -O options outside'; c = "find -D tree -O2 $outPosix -delete"; want = 'ask' }
+        @{ n = 'find -L inside'; c = 'find -L . -name x -delete'; want = 'allow' }
+        @{ n = 'a delete of a folder holding a denied root'; c = 'rm -rf ~/workspace/clients'; want = 'deny' }
+        @{ n = 'Remove-Item of a folder holding a denied root'; c = "Remove-Item -Recurse -Force $ws\clients"; want = 'deny' }
+        @{ n = 'a delete of the workspace that holds a denied root'; c = 'rm -rf ~/workspace'; want = 'deny' }
+        @{ n = 'cd, then a relative delete of a denied root'; c = 'cd ~/workspace/clients && rm -rf acme'; want = 'deny' }
+        @{ n = 'a delete in a denied root'; c = "rm -rf $ws\clients\acme\x"; want = 'deny' }
+        @{ n = 'a delete naming a denied root and an outside path'; c = "rm -rf ~/.claude/x ~/workspace/clients/acme"; want = 'deny' }
+    )
+    foreach ($c in $deleteCases) {
+        $r = Shell $c.c ($c.d ?? $hubDir) ''
+        $got = if ($r.Out -match '"permissionDecision":"deny"') { 'deny' } elseif ($r.Out -match '"permissionDecision":"ask"') { 'ask' } elseif ($r.Out -eq '') { 'allow' } else { 'other' }
+        Check "shell guard delete: $($c.n) is $($c.want)" ($r.Code -eq 0 -and $got -eq $c.want) "$($c.c) -> $($r.Out) $($r.Err)"
+    }
+    $r = Shell 'rm -rf build' $hubDir '' ''
+    Check 'shell guard delete: without a workspace root, a delete asks' ($r.Out -match '"permissionDecision":"ask"') $r.Out
+    $r = Shell 'rm -rf build' $hubDir "$tmp\no-such-home"
+    Check 'shell guard delete: a home without settings still judges deletes' ($r.Out -eq '') $r.Out
+    $r = Shell 'rm -rf ~/.claude/x' $hubDir "$tmp\no-such-home"
+    Check 'shell guard delete: a home without settings still asks outside' ($r.Out -match '"permissionDecision":"ask"') $r.Out
+    $r = Shell 'rm -rf ~/workspace' $hubDir "$tmp\no-such-home"
+    Check 'shell guard delete: deleting the whole workspace asks' ($r.Out -match '"permissionDecision":"ask"') $r.Out
+    New-Item -ItemType Directory -Path "$tmp\corrupt-home" -Force | Out-Null
+    [IO.File]::WriteAllText("$tmp\corrupt-home\settings.json", '{ not json')
+    $r = Shell 'rm -rf build' $hubDir "$tmp\corrupt-home"
+    Check 'shell guard delete: when the guard fails, a delete inside asks' ($r.Code -eq 0 -and $r.Out -match '"permissionDecision":"ask"') $r.Out
+    $r = Shell "Remove-Item -Recurse $outside" $hubDir "$tmp\corrupt-home"
+    Check 'shell guard delete: when the guard fails, a delete outside asks' ($r.Code -eq 0 -and $r.Out -match '"permissionDecision":"ask"') $r.Out
+    $r = Shell 'git status' $hubDir "$tmp\corrupt-home"
+    Check 'shell guard: when the guard fails, other commands run with a note' ($r.Code -eq 0 -and $r.Out -match 'systemMessage' -and $r.Out -notmatch 'permissionDecision') $r.Out
+    $sgCmd = (@((Read-Json "$tmp\.claude\settings.json").hooks.PreToolUse | ForEach-Object { $_.hooks } | Where-Object { $_.command -like '*dossier-shellguard.ps1*' }))[0].command
+    Check 'sync passes the workspace root to the shell guard' ($sgCmd -like "*dossier-shellguard.ps1`" -WorkspaceRoot `"$($ws.Replace('\', '/'))`"") $sgCmd
 
     # --- doctor
     Remove-Item "$tmp\.claude\CLAUDE.md"
@@ -471,7 +616,12 @@ try {
     [IO.File]::WriteAllText("$tmp\.claude\settings.json", ($s | ConvertTo-Json -Depth 32))
     $d = Run 'Test-Dossier.ps1'
     Check 'doctor finds a missing shell guard hook' ($d.Code -eq 1 -and $d.Out -match 'shell guard hook not wired')
+    [IO.File]::WriteAllText("$tmp\.claude\settings.json", ($orig -replace ' -WorkspaceRoot \\"[^\\]*\\"', ''))
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor warns about a shell guard hook without -WorkspaceRoot' ($d.Out -match 'WARN\s+\[firm\] shell guard hook doesn''t pass -WorkspaceRoot') $d.Out
     [IO.File]::WriteAllText("$tmp\.claude\settings.json", $orig)
+    $d = Run 'Test-Dossier.ps1'
+    Check 'doctor is quiet about a wired -WorkspaceRoot' ($d.Out -notmatch 'doesn''t pass -WorkspaceRoot') $d.Out
 
     Write-Registry @($acmeOut, $widget) -Permissions $shared
     Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null

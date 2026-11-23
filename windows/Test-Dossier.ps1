@@ -66,6 +66,7 @@ foreach ($e in $reg.Entries) {
     }
     if (-not (Test-DsrHooked $s 'SessionStart' 'dossier-guard.ps1')) { Report 'FAIL' "$tag guard hook not wired in $settingsFile" }
     if (-not (Test-DsrHooked $s 'PreToolUse' 'dossier-shellguard.ps1')) { Report 'FAIL' "$tag shell guard hook not wired in $settingsFile" }
+    elseif (-not (Test-DsrHooked $s 'PreToolUse' "dossier-shellguard.ps1`" -WorkspaceRoot `"$($reg.WorkspaceRoot.Replace('\', '/'))`"")) { Report 'WARN' "$tag shell guard hook doesn't pass -WorkspaceRoot $($reg.WorkspaceRoot), so every delete asks (Sync-Dossier -Apply)" }
 
     $agents = @(Get-DsrEntryAgents $reg $e)
     $stale = @()

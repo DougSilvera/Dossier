@@ -219,7 +219,7 @@ function Sync-Settings($Entry) {
     if (-not $has) { $groups += [ordered]@{ hooks = @([ordered]@{ type = 'command'; command = $cmd }) } }
     $s.hooks.SessionStart = $groups
 
-    $cmd = Get-DsrShellGuardCommand
+    $cmd = (Get-DsrShellGuardCommand) + ' -WorkspaceRoot "' + $reg.WorkspaceRoot.Replace('\', '/') + '"'
     $groups = @(); if ($s.hooks.Contains('PreToolUse')) { $groups = @($s.hooks.PreToolUse | Where-Object { $null -ne $_ }) }
     $has = $false
     foreach ($g in $groups) { foreach ($h in @($g.hooks)) { if ([string]$h.command -like '*dossier-shellguard.ps1*') { $has = $true; $h.command = $cmd; $g.matcher = 'Bash|PowerShell' } } }
