@@ -6,7 +6,7 @@ $script:DsrGuardScript = Join-Path $PSScriptRoot 'dossier-guard.ps1'
 $script:DsrShellGuardScript = Join-Path $PSScriptRoot 'dossier-shellguard.ps1'
 $script:DsrManagedMarker = '<!-- managed by dossier -->'
 $script:DsrAgentMarker = '<!-- managed by dossier: role contract below. Edit the agent in your roster, then run Sync-Dossier. -->'
-$script:DsrRoles = @('lead', 'builder', 'reviewer', 'researcher', 'ops', 'hr')
+$script:DsrRoles = @('lead', 'builder', 'reviewer', 'researcher', 'writer', 'ops', 'hr')
 
 # Variables a Claude Code session hands to its children. Everything else CLAUDE_* is the
 # user's own configuration and must reach the child untouched.

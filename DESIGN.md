@@ -64,6 +64,7 @@ Dossier defines a small team of **roles**. Each person brings their own **agents
 | `builder` | Changes code in small tested steps and stops at a reviewable diff. |
 | `reviewer` | Reviews for correctness; never reviews its own work. |
 | `researcher` | Finds out what's true, with sources. |
+| `writer` | Writes and edits documentation; every claim checked against the code. |
 | `ops` | Runs and watches local services. |
 | `hr` | Creates and changes the agents themselves, in the roster only. |
 

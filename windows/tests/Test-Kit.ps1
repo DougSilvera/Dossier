@@ -1063,6 +1063,14 @@ try {
     Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
     Check 'agentNames alone doesn''t bring the lead' (-not (Test-Path "$aHome\agents\shep.md") -and -not (Read-Json "$aHome\settings.json").Contains('agent') -and (Test-Path "$aHome\agents\otto.md") -and (Test-Path "$aHome\agents\rae.md"))
 
+    # the writer role installs with its own contract
+    Agent 'wren'
+    Write-Registry @($acmeB, $widget, $betaOne, $gamma) -Products @($prod, $core) -Agents ([ordered]@{ source = '~/.dossier/agents'; roles = [ordered]@{ builder = 'bob'; writer = 'wren' } })
+    $r = Run 'Sync-Dossier.ps1' @('-Apply')
+    Check 'sync with a writer exits 0' ($r.Code -eq 0) "$($r.Out) $($r.Err)"
+    Check 'the writer is installed with the writer contract' ((Get-Content -Raw "$fHome\agents\wren.md") -match '(?s)\A---\nname: wren.*## Role: writer.*Memory, in three layers')
+    Check 'an enterprise home gets the writer by default' (Test-Path "$aHome\agents\wren.md")
+
     # no agents in the registry: Dossier's links go
     Write-Registry @($acmeB, $widget, $betaOne, $gamma) -Products @($prod, $core)
     Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
