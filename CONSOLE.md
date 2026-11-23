@@ -25,7 +25,7 @@ The shell may show enterprise board text but has no way to pass it on: content t
 - Hub, product and no-seat client homes allow `Bash` and `PowerShell`, so any localhost listener could be curled by a hub agent. Hence no ports.
 - Boards follow the firm lead's format: `STATUS.md` at the engagement root, sections "Needs you", "In progress", "Done", one dated line per item.
 - The enterprise client gets its own lead through a per-entry lead override (section 4.6).
-- The enterprise client has `sharedPermissions: false`; its pane checks its own home's delete ask rules.
+- Deletes are decided by the shell guard (`windows/dossier-shellguard.ps1`), a PreToolUse hook for Bash and PowerShell that Sync installs in every home, the enterprise client's included, with `-WorkspaceRoot` set to the registry's `workspaceRoot`. Its deny checks run first: a delete that would reach a path the home's deny rules cover is denied. Otherwise a delete runs without a prompt when every target is inside `workspaceRoot`, and gets `ask` when a target is outside it, is the whole workspace, or can't be resolved (a variable, command output, piped input). Without `-WorkspaceRoot` every delete asks. The registry carries no delete ask rules. Each pane checks its own home's hook.
 - Hub agents can edit this repo, so any code that holds enterprise content (the enterprise pane and the shell) runs from a pinned copy firm sessions can't edit.
 - pwsh 7.7 on .NET 11 loads WPF. Node is present because Claude Code runs on it. pwsh is the Microsoft Store build: its exe lives under `C:\Program Files\WindowsApps\...` and its hash changes with every Store update.
 - Parent process, ancestry and environment are all forgeable by any process running as the user. The spike started a child with a forged parent (`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`) from inside a Claude session. Every process-identity check in this design is accident prevention, not a boundary.
@@ -109,7 +109,7 @@ Shell rules: no chat or text input; no Claude or Node child; clicking a card sen
 | Teammates | `SubagentStart`/`SubagentStop` paired by agent id, plus `<home>\agents\*.md` | All |
 | Background work | `Stop` background tasks | All |
 | Needs attention | `Notification` events plus `waitingFor` | All, and counts in the shell |
-| Safety badges | The home's settings: delete ask rules present, no `PermissionRequest` hook, GUI hooks present | All |
+| Safety badges | The home's `settings.json`: shell guard PreToolUse hook present and passing `-WorkspaceRoot` with the registry's `workspaceRoot` (the check `Test-Dossier` makes), no `PermissionRequest` hook, GUI hooks present. The badge shows the wiring, not that a given command was checked. | All |
 | Chat | Sidecar | Hub and enterprise only |
 | Transcript tail (v3) | `<home>\projects\...\*.jsonl`, labelled unstable | Optional |
 
@@ -124,7 +124,7 @@ One in the hub pane (firm lead), one in the enterprise pane (enterprise lead). T
 
 ### 4.2 Required sidecar settings, checked at start
 
-- `settingSources: ['user','project','local']` explicitly (omitting it now loads all sources too, but stay explicit), so deny rules, ask rules, guard hooks and `agent` load. Spike: the hub run loaded the firm lead, the ask rule reached `canUseTool`, deny rules and the shell guard held.
+- `settingSources: ['user','project','local']` explicitly (omitting it now loads all sources too, but stay explicit), so deny rules, permission rules, guard hooks and `agent` load. Spike: the hub run loaded the firm lead, an ask rule reached `canUseTool`, deny rules and the shell guard held. The spike ran before the shell guard decided deletes, so confirm before v2 that the guard's `ask` reaches `canUseTool` the same way.
 - After init, confirm the main agent is the firm lead or the enterprise lead and the guard hooks are active; otherwise refuse input. The init message has no main-agent field and the SDK's in-process `SessionStart` callback didn't fire, so read `agent_type` from the GUI's own `SessionStart` hook record in `events.ndjson` (or pass the agent explicitly if the SDK's main-thread `agent` option proves out).
 - Leave `CLAUDE_CONFIG_DIR` unset for `~/.claude`: setting it explicitly changed the loaded tools and agents.
 - `pathToClaudeCodeExecutable` = the binary `cc` resolves (match `\@anthropic-ai\claude-code\`, not a fixed prefix; nvm links `Program Files\nodejs` to `C:\ProgramData\nvm\...`); cwd `Roots[0]`.
@@ -137,7 +137,7 @@ GUI sessions recorded in `sessions.json` and locked in `locks\<id>.lock` with th
 
 ### 4.4 `claude --bg`
 
-Without it, each chat pane hosts its lead and prompts come to the GUI. With it, the lead survives the GUI and shows in `claude agents`, but the GUI can't type into it (`-p --resume` and SDK `resume` are refused while it runs) and its prompts are answerable only through `claude attach`; the pane shows the prompt from `Notification permission_prompt` plus `waitingFor` and offers "Open attached terminal" (`claude attach <id>`) or Remote Control. Background sessions run in auto mode; ask rules still override it. Start background leads with `--strict-mcp-config`. Choice per lead, before v2.
+Without it, each chat pane hosts its lead and prompts come to the GUI. With it, the lead survives the GUI and shows in `claude agents`, but the GUI can't type into it (`-p --resume` and SDK `resume` are refused while it runs) and its prompts are answerable only through `claude attach`; the pane shows the prompt from `Notification permission_prompt` plus `waitingFor` and offers "Open attached terminal" (`claude attach <id>`) or Remote Control. Background sessions run in auto mode; whether the shell guard's `ask` still prompts there is unchecked, so confirm it before choosing `--bg` for a lead. Start background leads with `--strict-mcp-config`. Choice per lead, before v2.
 
 ### 4.5 Remote Control link-out (v3, off by default)
 
@@ -147,7 +147,9 @@ Each home maps to a browser profile (`gui.browserProfile`), so the enterprise cl
 
 Delivered separately: a per-entry `agentNames` override, enterprise-seat entries only, so the enterprise client gets its own lead and the firm keeps the roster's lead. The enterprise lead's file in `~/.dossier/agents` holds habits only; client specifics belong in the client's root `CLAUDE.md`.
 
-## 5. Permission prompts (the user approves every delete)
+## 5. Permission prompts (the user approves every delete the shell guard asks about)
+
+Deletes inside `workspaceRoot` run without a prompt (section 1). The prompts below are the shell guard's `ask` and any other permission prompt.
 
 1. GUI chat: `canUseTool` sends the request to the pane, which shows a card (tool, full command, folder, account band) with Allow once and Deny only. Allow is sent only from that click handler with the matching id. Timeout (10 min), closed pane or wrong id → deny.
 2. Terminal sessions: `Notification permission_prompt` or `waitingFor` raises a banner, a content-free toast and a shell count. "Focus terminal" brings the window forward. Answered only in the terminal.
@@ -204,4 +206,4 @@ PowerShell 7 + WPF (XAML), no new runtime for v1. `pwsh -NoProfile -STA`; runspa
 - B16 With LocalDumps on, the doctor fails; after killing the shell, no `.dmp` files.
 - B17 The firm lead in the hub chat tries every path to the enterprise board (file tools, shell, curl to localhost, the console folder); all denied or empty.
 
-Manual after v1: `Test-Dossier` no FAIL; from a hub terminal, curl and `Get-Content` against enterprise GUI data and the console folder are denied or empty; an enterprise delete prompt shows as a shell count and "Focus terminal", answerable only in the terminal.
+Manual after v1: `Test-Dossier` no FAIL; from a hub terminal, curl and `Get-Content` against enterprise GUI data and the console folder are denied or empty; an enterprise delete of a path outside `workspaceRoot` prompts, and the prompt shows as a shell count and "Focus terminal", answerable only in the terminal.
