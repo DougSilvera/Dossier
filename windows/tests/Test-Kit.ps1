@@ -154,7 +154,12 @@ try {
     Check 'sync is idempotent' ($r.Out -match 'In sync\.') $r.Out
 
     # --- inside a Claude session nothing is written to an enterprise home or root
-    function Snap([string[]] $Dirs) { return (@($Dirs | Where-Object { Test-Path $_ } | ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -Force -File } | ForEach-Object { "$($_.FullName)=$((Get-FileHash -LiteralPath $_.FullName).Hash)" }) -join "`n") }
+    function Snap([string[]] $Dirs) {
+        return (@($Dirs | Where-Object { Test-Path $_ } | ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -Force } | ForEach-Object {
+            $what = if ($_.LinkType) { "$($_.LinkType)->$(@($_.Target) -join '|')" } elseif ($_.PSIsContainer) { 'dir' } else { (Get-FileHash -LiteralPath $_.FullName).Hash }
+            "$($_.FullName)|$($_.Attributes)|$what"
+        }) -join "`n")
+    }
     $newco = [ordered]@{ key = 'newco'; root = '~/workspace/clients/newco'; seat = 'enterprise'; expectEmail = 'me@newco.test' }
     Write-Registry @($acme, $widget, $newco)
     [IO.File]::WriteAllText("$tmp\.dossier\personal.md", "# Personal`n`nNo commits.`nNo pushes.`n")
@@ -172,6 +177,13 @@ try {
         if (-not $mode) { Check 'session dry run still plans the no-seat home' ($r.Out -match 'plan\s+write \S*widgetco\\CLAUDE\.md' -and $r.Out -match '\d+ change\(s\) planned') $r.Out }
     }
     Remove-Item Env:\CLAUDECODE
+    New-Item -ItemType Directory -Path "$tmp\.claude-homes\acme\stray" | Out-Null
+    Check 'snapshot sees a new empty folder' ((Snap $acmeDirs) -ne $acmeBefore)
+    [IO.Directory]::Delete("$tmp\.claude-homes\acme\stray")
+    New-Item -ItemType Junction -Path "$tmp\.claude-homes\acme\stray" -Target "$ws\hub" | Out-Null
+    Check 'snapshot sees a new junction' ((Snap $acmeDirs) -ne $acmeBefore)
+    [IO.Directory]::Delete("$tmp\.claude-homes\acme\stray")
+    Check 'snapshot matches again once they are gone' ((Snap $acmeDirs) -eq $acmeBefore)
     Check 'session apply syncs the no-seat home and the firm' ((Get-Content -Raw "$tmp\.claude-homes\widgetco\CLAUDE.md") -match 'No pushes' -and (Rule "$ws\clients\newco") -in (Read-Json "$tmp\.claude-homes\widgetco\settings.json").permissions.deny -and (Get-Content -Raw "$ws\hub\CLAUDE.md") -match '\| newco \|')
     $r = Run 'Sync-Dossier.ps1' @('-Apply')
     Check 'outside a session, enterprise writes happen' ($r.Code -eq 0 -and (Get-Content -Raw "$tmp\.claude-homes\acme\CLAUDE.md") -match 'No pushes' -and (Rule "$ws\clients\newco") -in (Read-Json "$tmp\.claude-homes\acme\settings.json").permissions.deny -and (Test-Path "$tmp\.claude-homes\newco\settings.json") -and (Test-Path "$ws\clients\newco\CLAUDE.md")) "$($r.Out) $($r.Err)"
@@ -736,10 +748,11 @@ try {
     Check 'import rejects an unknown key' ($r.Code -eq 1)
     $env:CLAUDECODE = '1'
     [IO.File]::AppendAllText("$tmp\.dossier\personal.md", "No force pushes.`n")
+    $acmeBefore = Snap $acmeDirs
     $r = Run 'Import-Dossier.ps1' @('-Key', 'base')
-    Check 'import of a no-seat entry goes on when Sync skips an enterprise home' ($r.Code -eq 0 -and $r.Out -match 'skip\s+write .*acme\\CLAUDE\.md' -and $r.Out -match 'already cloned') "$($r.Out) $($r.Err)"
+    Check 'import of a no-seat entry goes on when Sync skips an enterprise home' ($r.Code -eq 0 -and $r.Out -match 'skip\s+write .*acme\\CLAUDE\.md' -and $r.Out -match 'already cloned' -and (Snap $acmeDirs) -eq $acmeBefore) "$($r.Out) $($r.Err)"
     $r = Run 'Import-Dossier.ps1' @('-Key', 'acme', '-Apply')
-    Check 'import refuses an enterprise client from a session' ($r.Code -eq 1 -and $r.Err -match 'Refused' -and -not (Test-Path "$ws\clients\acme\src"))
+    Check 'import refuses an enterprise client from a session' ($r.Code -eq 1 -and $r.Err -match 'Refused' -and -not (Test-Path "$ws\clients\acme\src") -and (Snap $acmeDirs) -eq $acmeBefore)
     Remove-Item Env:\CLAUDECODE
 
     New-Item -ItemType Directory -Path "$pRoot\src\code" | Out-Null
@@ -917,10 +930,11 @@ try {
     $acmeC = With $acmeB @{ basedOn = @('base', 'core') }
     Write-Registry @($acmeC, $widgetC, $betaC, $gamma) -Products @($prod, $core)
     Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
+    $acmeBefore = Snap $acmeDirs
     $env:CLAUDECODE = '1'
     $r = Run 'Sync-Dossier.ps1'
     Remove-Item Env:\CLAUDECODE
-    Check 'sync skips an enterprise client''s status inside a session' ($r.Out -match "skip\s+product status for 'acme'") $r.Out
+    Check 'sync skips an enterprise client''s status inside a session' ($r.Out -match "skip\s+product status for 'acme'" -and (Snap $acmeDirs) -eq $acmeBefore) $r.Out
     Check 'a skipped enterprise status exits 2, not In sync' ($r.Code -eq 2 -and $r.Out -notmatch 'In sync\.') "$($r.Code) $($r.Out)"
 
     # dropping basedOn removes the status file and the skill
@@ -1003,10 +1017,11 @@ try {
     Agent 'rae' 'Voice: very dry.'
     $d = Run 'Test-Dossier.ps1'
     Check 'doctor finds enterprise copies out of date' ($d.Out -match 'WARN\s+\[acme\] agents out of date: bob, rae' -or $d.Out -match 'WARN\s+\[acme\] agents out of date: rae') $d.Out
+    $acmeBefore = Snap $acmeDirs
     $env:CLAUDECODE = '1'
     $r = Run 'Sync-Dossier.ps1' @('-Apply')
     Remove-Item Env:\CLAUDECODE
-    Check 'session apply skips enterprise agent copies, rolls out the rest' ($r.Code -eq 2 -and $r.Out -match 'skip\s+write \S*acme\\agents\\rae\.md \(reviewer\) \(enterprise seat' -and (Get-Content -Raw "$aHome\agents\rae.md") -notmatch 'very dry' -and (Get-Content -Raw "$fHome\agents\rae.md") -match 'very dry') "$($r.Out) $($r.Err)"
+    Check 'session apply skips enterprise agent copies, rolls out the rest' ($r.Code -eq 2 -and $r.Out -match 'skip\s+write \S*acme\\agents\\rae\.md \(reviewer\) \(enterprise seat' -and (Get-Content -Raw "$aHome\agents\rae.md") -notmatch 'very dry' -and (Snap $acmeDirs) -eq $acmeBefore -and (Get-Content -Raw "$fHome\agents\rae.md") -match 'very dry') "$($r.Out) $($r.Err)"
     Run 'Sync-Dossier.ps1' @('-Apply') | Out-Null
     Check 'sync rolls an edit out to the firm, linked and enterprise homes' ((Get-Content -Raw "$wHome\agents\rae.md") -match 'very dry' -and (Get-Content -Raw "$aHome\agents\rae.md") -match 'very dry')
     Agent 'bob' 'Voice: none.' ''
