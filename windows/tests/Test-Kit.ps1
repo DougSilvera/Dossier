@@ -155,9 +155,13 @@ try {
 
     # --- inside a Claude session nothing is written to an enterprise home or root
     function Snap([string[]] $Dirs) {
-        return (@($Dirs | Where-Object { Test-Path $_ } | ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -Force } | ForEach-Object {
-            $what = if ($_.LinkType) { "$($_.LinkType)->$(@($_.Target) -join '|')" } elseif ($_.PSIsContainer) { 'dir' } else { (Get-FileHash -LiteralPath $_.FullName).Hash }
-            "$($_.FullName)|$($_.Attributes)|$what"
+        return (@($Dirs | ForEach-Object {
+            $root = Get-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue
+            if (-not $root) { return "$_|missing" }
+            @($root) + @(if (-not $root.LinkType) { Get-ChildItem -LiteralPath $_ -Recurse -Force }) | ForEach-Object {
+                $what = if ($_.LinkType) { "$($_.LinkType)->$(@($_.Target) -join '|')" } elseif ($_.PSIsContainer) { 'dir' } else { (Get-FileHash -LiteralPath $_.FullName).Hash }
+                "$($_.FullName)|$($_.Attributes)|$what"
+            }
         }) -join "`n")
     }
     $newco = [ordered]@{ key = 'newco'; root = '~/workspace/clients/newco'; seat = 'enterprise'; expectEmail = 'me@newco.test' }
@@ -184,6 +188,16 @@ try {
     Check 'snapshot sees a new junction' ((Snap $acmeDirs) -ne $acmeBefore)
     [IO.Directory]::Delete("$tmp\.claude-homes\acme\stray")
     Check 'snapshot matches again once they are gone' ((Snap $acmeDirs) -eq $acmeBefore)
+    $probe = "$tmp\snap-probe"; $twin = "$tmp\snap-twin"; $probeBefore = Snap @($probe)
+    New-Item -ItemType Directory -Path $probe, $twin | Out-Null
+    Check 'snapshot sees a missing folder created empty' ((Snap @($probe)) -ne $probeBefore)
+    [IO.File]::WriteAllText("$probe\f", 'x'); [IO.File]::WriteAllText("$twin\f", 'x')
+    $probeBefore = Snap @($probe)
+    Remove-Item -LiteralPath $probe -Recurse -Force
+    New-Item -ItemType Junction -Path $probe -Target $twin | Out-Null
+    Check 'snapshot sees a folder swapped for a junction to an identical tree' ((Snap @($probe)) -ne $probeBefore)
+    [IO.Directory]::Delete($probe)
+    Remove-Item -LiteralPath $twin -Recurse -Force
     Check 'session apply syncs the no-seat home and the firm' ((Get-Content -Raw "$tmp\.claude-homes\widgetco\CLAUDE.md") -match 'No pushes' -and (Rule "$ws\clients\newco") -in (Read-Json "$tmp\.claude-homes\widgetco\settings.json").permissions.deny -and (Get-Content -Raw "$ws\hub\CLAUDE.md") -match '\| newco \|')
     $r = Run 'Sync-Dossier.ps1' @('-Apply')
     Check 'outside a session, enterprise writes happen' ($r.Code -eq 0 -and (Get-Content -Raw "$tmp\.claude-homes\acme\CLAUDE.md") -match 'No pushes' -and (Rule "$ws\clients\newco") -in (Read-Json "$tmp\.claude-homes\acme\settings.json").permissions.deny -and (Test-Path "$tmp\.claude-homes\newco\settings.json") -and (Test-Path "$ws\clients\newco\CLAUDE.md")) "$($r.Out) $($r.Err)"
