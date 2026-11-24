@@ -20,7 +20,7 @@ For an enterprise-seat client, `cc` refuses to start when the home is logged in 
 
 Plain `claude` is routed the same way, so typing it out of habit, or in VS Code's terminal, still lands in the right home. Set `DOSSIER_NO_CLAUDE_SHIM=1` before your profile loads to turn that off.
 
-At session start, `dossier-guard` stays silent when the home matches the folder. A CRITICAL message means relaunch with `cc`. During the session, `dossier-shellguard` denies shell commands that would reach a folder the home is kept out of, which deny rules alone don't cover on Windows. It also asks before a delete that reaches outside `workspaceRoot`; deletes inside it run without a prompt.
+At session start, `dossier-guard` stays silent when the home matches the folder. A CRITICAL message means relaunch with `cc`. During the session, `dossier-shellguard` denies shell commands that would reach a folder the home is kept out of, which deny rules alone don't cover on Windows. It also asks before a delete that reaches outside `workspaceRoot`; deletes inside it run without a prompt. Two kinds of text get a lighter check. The quoted pattern of grep, rg, sed or Select-String is checked only for a denied path it names, unless it runs something (`$(…)`, a backtick, or a sed script that reads, writes or runs). The body of a quoted-marker heredoc that an interpreter reads as its script (`python - <<'EOF'` in the Bash tool) isn't judged for deletes or recursive searches unless it shells out (`os.system`, `subprocess` and the like), but it is still checked for denied paths. Output that script writes to a file a later command runs (`python - <<'EOF' > x.sh && sh x.sh`) isn't followed, though the same script given with `python -c` is still judged. Where the guard can't read a command's quoting or structure for certain, it gives the text the full check.
 
 ## Setup
 
@@ -61,3 +61,5 @@ pwsh -NoProfile -File windows\tests\Test-Kit.ps1
 ```
 
 They run against a throwaway `USERPROFILE` and a stub `claude`, never your real homes.
+
+The throwaway folder goes under `%TEMP%`. To put it somewhere else, for example inside your workspace so the kit's own cleanup deletes only there, pass `-ScratchRoot <folder>`. The kit makes a `dossier-test-<id>` folder under it and removes that folder when it finishes.

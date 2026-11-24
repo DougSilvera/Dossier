@@ -1,5 +1,8 @@
 # Test-Kit.ps1 - runs every dossier tool against a throwaway USERPROFILE. Never touches yours.
-#   pwsh -NoProfile -File windows\tests\Test-Kit.ps1
+#   pwsh -NoProfile -File windows\tests\Test-Kit.ps1 [-ScratchRoot <folder>]
+# Its scratch folder goes under -ScratchRoot, or under %TEMP% when none is given.
+
+param([string] $ScratchRoot)
 
 $ErrorActionPreference = 'Stop'
 $win = Split-Path $PSScriptRoot -Parent
@@ -11,7 +14,7 @@ function Check([string] $Name, [bool] $Ok, [string] $Detail = '') {
 $saveVars = 'USERPROFILE', 'CLAUDECODE', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_CHILD_SESSION', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_GIT_BASH_PATH', 'DOSSIER_CONFIG', 'CLAUDE_BIN', 'PATH'
 $saved = @{}; foreach ($v in $saveVars) { $saved[$v] = [Environment]::GetEnvironmentVariable($v) }
 foreach ($v in 'CLAUDECODE', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL') { Remove-Item "Env:\$v" -ErrorAction SilentlyContinue }
-$tmp = Join-Path ([IO.Path]::GetTempPath()) ("dossier-test-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$tmp = Join-Path ($ScratchRoot ? $ScratchRoot : [IO.Path]::GetTempPath()) ("dossier-test-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Path $tmp | Out-Null
 $tmp = (Get-Item -LiteralPath $tmp).FullName
 $env:USERPROFILE = $tmp
@@ -419,10 +422,10 @@ try {
     $env:DOSSIER_CONFIG = Join-Path $tmp '.dossier.json'
 
     # --- shell guard
-    function Shell([string] $Command, [string] $Cwd, [string] $ConfigDir, [string] $Root = $ws) {
+    function Shell([string] $Command, [string] $Cwd, [string] $ConfigDir, [string] $Root = $ws, [string] $Tool = 'PowerShell') {
         if ($ConfigDir) { $env:CLAUDE_CONFIG_DIR = $ConfigDir } elseif (Test-Path Env:\CLAUDE_CONFIG_DIR) { Remove-Item Env:\CLAUDE_CONFIG_DIR }
         $rootArgs = if ($Root) { @('-WorkspaceRoot', $Root) } else { @() }
-        $r = Run 'dossier-shellguard.ps1' $rootArgs $tmp (@{ tool_name = 'PowerShell'; tool_input = @{ command = $Command }; cwd = $Cwd } | ConvertTo-Json)
+        $r = Run 'dossier-shellguard.ps1' $rootArgs $tmp (@{ tool_name = $Tool; tool_input = @{ command = $Command }; cwd = $Cwd } | ConvertTo-Json)
         if (Test-Path Env:\CLAUDE_CONFIG_DIR) { Remove-Item Env:\CLAUDE_CONFIG_DIR }
         return $r
     }
@@ -582,6 +585,189 @@ try {
         $r = Shell $c.c ($c.d ?? $hubDir) ''
         $got = if ($r.Out -match '"permissionDecision":"deny"') { 'deny' } elseif ($r.Out -match '"permissionDecision":"ask"') { 'ask' } elseif ($r.Out -eq '') { 'allow' } else { 'other' }
         Check "shell guard delete: $($c.n) is $($c.want)" ($r.Code -eq 0 -and $got -eq $c.want) "$($c.c) -> $($r.Out) $($r.Err)"
+    }
+
+    # quoted search patterns and heredocs fed to an interpreter are text; text fed to a shell, by name or path, is run
+    $tmpPosix = '/' + $tmp.Substring(0, 1).ToLower() + $tmp.Substring(2).Replace('\', '/')
+    $textCases = @(
+        @{ n = 'a bracket class in a quoted sed pattern'; c = "sed -n '/[Hh]ome/p' README.md"; want = 'allow' }
+        @{ n = 'a bracket class in a quoted grep pattern over the homes folder'; c = "grep -n '~/.claude-homes/[Hh]' CLAUDE.md"; want = 'allow' }
+        @{ n = 'a sed script with a wildcard over the homes folder'; c = "sed -i 's|$tmpPosix/.claude-homes/[a-z]*|<home>|g' notes.md"; want = 'allow' }
+        @{ n = 'an rg pattern after -g'; c = "rg -n -g '*.md' '/[Hh]ome' ."; want = 'allow' }
+        @{ n = 'grep -e patterns'; c = "grep -e '/[Hh]ome' -e '/[Ww]ork' README.md"; want = 'allow' }
+        @{ n = 'a grep pattern after -A 3'; c = "grep -A 3 '/[Hh]ome' README.md"; want = 'allow' }
+        @{ n = 'Select-String -Pattern'; c = "Select-String -Pattern '/[Hh]ome' -Path README.md"; t = 'PowerShell'; want = 'allow' }
+        @{ n = 'Select-String in a pipeline'; c = "Get-Content README.md | Select-String '/[Hh]ome'"; t = 'PowerShell'; want = 'allow' }
+        @{ n = 'a python heredoc mentioning cd\ and rm of the homes folder'; c = "python - <<'EOF'`nimport re`nprint(re.sub(r'^cd\\; rm -rf ~/.claude-homes', '', 'x'))`nEOF"; want = 'allow' }
+        @{ n = 'a python3 heredoc with a cd\ comment'; c = "python3 <<'EOF'`nfor line in open('session.log'):`n    if line.startswith('cd\\'):`n        print(line)  # cd\; rm -rf ~/.claude-homes`nEOF"; want = 'allow' }
+        @{ n = 'a quoted-marker node heredoc mentioning rm -rf /'; c = "node <<'EOF'`nconsole.log(`"cd\\; rm -rf /`")`nEOF"; want = 'allow' }
+        @{ n = 'grep -ve pattern'; c = "grep -ve '/[Hh]ome' README.md"; want = 'allow' }
+        # an unquoted marker: bash runs $( ) and backticks in the body
+        @{ n = 'an unquoted-marker node heredoc mentioning rm -rf /'; c = "node <<EOF`nconsole.log(`"cd\\; rm -rf /`")`nEOF"; want = 'deny' }
+        @{ n = 'an unquoted-marker heredoc with $( ) deleting a denied holder'; c = 'python3 <<EOF<NL>print("$(rm -rf ~/.claude-homes)")<NL>EOF'; want = 'deny' }
+        @{ n = 'an unquoted-marker heredoc with $( ) deleting outside'; c = 'python3 <<EOF<NL>print("$(rm -rf <OUT>)")<NL>EOF'; want = 'ask' }
+        @{ n = 'an unquoted-marker heredoc with a backtick delete outside'; c = 'python3 <<EOF<NL>print("`rm -rf <OUT>`")<NL>EOF'; want = 'ask' }
+        @{ n = 'an unquoted-marker heredoc with $( ) reading a denied file'; c = 'python3 <<EOF<NL>print("""$(cat <TMP>/.claude-homes/./acme/CLAUDE.md)""")<NL>EOF'; want = 'deny' }
+        @{ n = 'an unquoted-marker heredoc that is a bare $( ) delete'; c = 'python3 <<EOF<NL>$(rm -rf ~/.claude-homes/acme)<NL>EOF'; want = 'deny' }
+        # << in quotes or a comment is no heredoc
+        @{ n = 'a quoted << then a delete of a denied holder'; c = 'echo ''x;python <<EOF''<NL>rm -rf ~/.claude-homes'; want = 'deny' }
+        @{ n = 'a quoted << then a delete outside'; c = 'echo ''x;python <<EOF''<NL>rm -rf <OUT>'; want = 'ask' }
+        @{ n = 'a commented << then a delete'; c = '#;python <<EOF<NL>rm -rf ~/.claude-homes'; want = 'deny' }
+        @{ n = 'a << in a commit message, then a delete'; c = 'git commit -m "docs (python <<EOF)"<NL>rm -rf ~/.claude-homes'; want = 'deny' }
+        @{ n = 'a quoted << in Write-Output, then Remove-Item'; c = 'Write-Output ''x;python <<EOF''<NL>Remove-Item -Recurse -Force ~/.claude-homes'; want = 'deny' }
+        @{ n = 'a quoted << then a read of a denied file'; c = 'echo ''x;python <<EOF''<NL>cat ~/.claude-homes/acme/CLAUDE.md'; want = 'deny' }
+        @{ n = 'a heredoc that is stdin to python -c, not its script'; c = 'python -c "import os,sys; os.system(sys.stdin.read())" <<''EOF''<NL>rm -rf ~/.claude-homes<NL>EOF'; want = 'deny' }
+        @{ n = 'a heredoc whose marker never closes'; c = 'python - <<''EOF''<NL>x = 1<NL>rm -rf ~/.claude-homes'; want = 'deny' }
+        @{ n = 'a python heredoc piped into |& sh'; c = 'python - <<''EOF'' |& sh<NL>print("rm -rf ~/.claude-homes")<NL>EOF'; want = 'deny' }
+        # a quoted-marker heredoc that shells out, or reads a denied path, is judged like python -c
+        @{ n = 'a python heredoc calling os.system'; c = 'python - <<''EOF''<NL>import os; os.system(''rm -rf ~/.claude-homes'')<NL>EOF'; want = 'deny' }
+        @{ n = 'a python heredoc calling subprocess'; c = 'python - <<''EOF''<NL>import subprocess; subprocess.run(''rm -rf ~/.claude-homes'', shell=True)<NL>EOF'; want = 'deny' }
+        @{ n = 'a node heredoc calling child_process'; c = 'node <<''EOF''<NL>require(''child_process'').execSync(''rm -rf ~/.claude-homes'')<NL>EOF'; want = 'deny' }
+        @{ n = 'a perl heredoc with a backtick delete outside'; c = 'perl <<''EOF''<NL>`rm -rf <OUT>`;<NL>EOF'; want = 'ask' }
+        @{ n = 'a python heredoc reading a denied file by a relative path'; c = 'python - <<''EOF''<NL>print(open(''.claude-homes/acme/x'').read())<NL>EOF'; d = $tmp; want = 'deny' }
+        # sed scripts that read, write or run, and patterns that run or are given another way
+        @{ n = 'sed r of a denied file'; c = 'sed -n ''r <TMP>/.claude-homes/./acme/CLAUDE.md'' README.md'; want = 'deny' }
+        @{ n = 'sed 1r of a denied file, relative'; c = 'sed ''1r .claude-homes/acme/CLAUDE.md'' README.md'; d = $tmp; want = 'deny' }
+        @{ n = 'sed 1e cat of a denied file'; c = 'sed ''1e cat <TMP>/.claude-homes/./acme/CLAUDE.md'' README.md'; want = 'deny' }
+        @{ n = 'sed 1e rm of a denied holder'; c = 'sed -n ''1e rm -rf ~/.claude-homes'' README.md'; want = 'deny' }
+        @{ n = 'a grep pattern of $(cat) of a denied file'; c = 'grep "$(cat <TMP>/.claude-homes/./acme/CLAUDE.md)" README.md'; want = 'deny' }
+        @{ n = 'a grep pattern of $(cat) of a denied file, relative'; c = 'grep "$(cat .claude-homes/acme/CLAUDE.md)" README.md'; d = $tmp; want = 'deny' }
+        @{ n = 'a grep pattern of $(cat) of a denied file through ~'; c = 'grep "$(cat ~/.claude-homes/acme/CLAUDE.md)" README.md'; want = 'deny' }
+        @{ n = 'a grep pattern of a backtick cat of a denied file'; c = 'grep "`cat ~/.claude-homes/acme/CLAUDE.md`" README.md'; want = 'deny' }
+        @{ n = 'grep --file=, then a quoted denied file'; c = 'grep --file=pats.txt ''.claude-homes/acme/CLAUDE.md'''; d = $tmp; want = 'deny' }
+        @{ n = 'grep -efoo, then a quoted denied file'; c = 'grep -efoo ''.claude-homes/acme/CLAUDE.md'''; d = $tmp; want = 'deny' }
+        @{ n = 'grep -ffoo, then a quoted denied file'; c = 'grep -ffoo ''.claude-homes/acme/CLAUDE.md'''; d = $tmp; want = 'deny' }
+        @{ n = 'grep -vf pats, then a quoted denied file'; c = 'grep -vf pats.txt ''.claude-homes/acme/CLAUDE.md'''; d = $tmp; want = 'deny' }
+        @{ n = 'grep --file=, then a quoted absolute denied file'; c = 'grep --file=pats.txt ''<TMP>/.claude-homes/./acme/CLAUDE.md'''; want = 'deny' }
+        @{ n = 'escaped quotes around a denied file'; c = 'grep \"x ~/.claude-homes/acme/CLAUDE.md \"'; want = 'deny' }
+        # a pipe into wsl, or a wrapper running a shell
+        @{ n = 'echo piped into env bash, a denied holder'; c = 'echo ''rm -rf ~/.claude-homes'' | env bash'; want = 'deny' }
+        @{ n = 'echo piped into sudo sh, a denied holder'; c = 'echo ''rm -rf ~/.claude-homes'' | sudo sh'; want = 'deny' }
+        @{ n = 'echo piped into /usr/bin/env -i bash, a denied holder'; c = 'echo ''rm -rf ~/.claude-homes'' | /usr/bin/env -i bash'; want = 'deny' }
+        @{ n = 'echo piped into nohup bash, outside'; c = 'echo ''rm -rf <OUT>'' | nohup bash'; want = 'ask' }
+        @{ n = 'echo piped into wsl, outside'; c = 'echo ''rm -rf <OUT>'' | wsl'; want = 'ask' }
+        @{ n = 'echo piped into wsl.exe, outside'; c = 'echo ''rm -rf <OUT>'' | wsl.exe'; want = 'ask' }
+        @{ n = 'echo piped into env python'; c = 'echo ''rm -rf <OUT>'' | env FOO=1 python'; want = 'allow' }
+        @{ n = 'an unquoted wildcard over the homes folder'; c = 'ls ~/.claude-homes/*/agents'; want = 'deny' }
+        @{ n = 'a quoted pattern, then an unquoted wildcard over the homes folder'; c = "grep -n '/[Hh]ome' ~/.claude-homes/*/CLAUDE.md"; want = 'deny' }
+        @{ n = 'a quoted Get-ChildItem -Path wildcard over the homes folder'; c = "Get-ChildItem -Path '$tmp\.claude-homes\*\agents'"; t = 'PowerShell'; want = 'deny' }
+        @{ n = 'a heredoc body naming a denied root'; c = "python - <<'EOF'`nopen('$($acmeFile.Replace('\', '/'))')`nEOF"; want = 'deny' }
+        @{ n = 'a delete after a python heredoc'; c = "python - <<'EOF'`nx = 1`nEOF`nrm -rf ~/.claude-homes"; want = 'deny' }
+        @{ n = 'a heredoc fed to bash'; c = "bash <<'EOF'`ncd\`nrm -rf ~/.claude-homes`nEOF"; want = 'deny' }
+        @{ n = 'a heredoc fed to /bin/bash'; c = "/bin/bash <<'EOF'`nrm -rf ~/.claude-homes`nEOF"; want = 'deny' }
+        @{ n = 'a heredoc fed to bash, outside'; c = "bash <<'EOF'`nrm -rf $outPosix`nEOF"; want = 'ask' }
+        @{ n = 'a heredoc piped into sh'; c = "cat <<'EOF' | sh`nrm -rf ~/.claude-homes`nEOF"; want = 'deny' }
+        @{ n = 'a python heredoc piped into bash'; c = "python - <<'EOF' | bash`nprint(`"rm -rf $outPosix`")`nEOF"; want = 'ask' }
+        @{ n = 'echo piped into /bin/sh, a denied holder'; c = "echo 'rm -rf ~/.claude-homes' | /bin/sh"; want = 'deny' }
+        @{ n = 'echo piped into /usr/bin/bash, outside'; c = "echo 'rm -rf $outPosix' | /usr/bin/bash"; want = 'ask' }
+        @{ n = 'echo piped into /bin/sh, outside'; c = "echo 'rm -rf $outPosix' | /bin/sh"; want = 'ask' }
+        @{ n = 'echo piped into /usr/bin/sh.exe, outside'; c = "echo 'rm -rf $outPosix' | /usr/bin/sh.exe"; want = 'ask' }
+        @{ n = 'echo piped into a quoted bash.exe path, outside'; c = "echo 'rm -rf $outPosix' | `"C:/Program Files/Git/bin/bash.exe`""; want = 'ask' }
+        @{ n = 'echo piped into powershell.exe by path, outside'; c = "echo 'Remove-Item -Recurse $outside' | C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -Command -"; want = 'ask' }
+        @{ n = 'echo piped into /bin/sh, inside'; c = "echo 'rm -rf build' | /bin/sh"; want = 'allow' }
+        @{ n = 'echo piped into /usr/bin/cat'; c = "echo 'rm -rf $outPosix' | /usr/bin/cat"; want = 'allow' }
+        # heredoc output that reaches a shell through process or command substitution
+        @{ n = 'a python heredoc into > >(sh)'; c = 'python - <<''EOF'' > >(sh)<NL>print("rm -rf ~/.claude-homes")<NL>EOF'; want = 'deny' }
+        @{ n = 'a python heredoc inside bash <( )'; c = 'bash <(python - <<''EOF''<NL>print("rm -rf ~/.claude-homes")<NL>EOF<NL>)'; want = 'deny' }
+        @{ n = 'a python heredoc inside eval "$( )"'; c = 'eval "$(python - <<''EOF''<NL>print("rm -rf ~/.claude-homes")<NL>EOF<NL>)"'; want = 'deny' }
+        @{ n = 'a python heredoc inside sh -c "$( )"'; c = 'sh -c "$(python - <<''EOF''<NL>print("rm -rf ~/.claude-homes")<NL>EOF<NL>)"'; want = 'deny' }
+        @{ n = 'a python3 heredoc inside source <( ), outside'; c = 'source <(python3 - <<''EOF''<NL>print("rm -rf <OUT>")<NL>EOF<NL>)'; want = 'ask' }
+        @{ n = 'a python heredoc into | tee >(sh)'; c = 'python - <<''EOF'' | tee >(sh)<NL>print("rm -rf ~/.claude-homes")<NL>EOF'; want = 'deny' }
+        @{ n = 'a python heredoc into a bare >(sh)'; c = 'python - <<''EOF'' >(sh)<NL>print("rm -rf ~/.claude-homes")<NL>EOF'; want = 'deny' }
+        @{ n = 'a python heredoc in backticks'; c = 'x=`python - <<''EOF''<NL>print("rm -rf ~/.claude-homes")<NL>EOF<NL>`; $x'; want = 'deny' }
+        @{ n = 'a ${ } whose nested quotes hide a <<'; c = 'echo "${x:-"}; python - <<''EOF''"}"<NL>rm -rf ~/.claude-homes<NL>EOF'; want = 'deny' }
+        @{ n = 'a python heredoc whose pipe into sh continues after the body'; c = 'python - <<''EOF'' |<NL>print("rm -rf ~/.claude-homes")<NL>EOF<NL>sh'; want = 'deny' }
+        @{ n = 'a python heredoc piped into sh across a backslash-newline'; c = 'python - <<''EOF'' |\<NL>sh<NL>print("rm -rf ~/.claude-homes")<NL>EOF'; want = 'deny' }
+        # << inside a string that spans lines, a $'' string, or after a backslash-newline
+        @{ n = 'a << inside a multi-line double-quoted string'; c = 'git commit -m "x<NL>python - <<''EOF''<NL>";rm -rf ~/.claude-homes<NL>EOF'; want = 'deny' }
+        @{ n = 'a << inside a multi-line single-quoted string'; c = 'echo ''<NL>python - <<"EOF"<NL>'';rm -rf ~/.claude-homes<NL>EOF'; want = 'deny' }
+        @{ n = 'a << inside a $'''' string'; c = 'echo $''\''; python - <<''EOF'''';<NL>rm -rf ~/.claude-homes<NL>EOF'; want = 'deny' }
+        @{ n = 'a heredoc fed to bash -s across a backslash-newline'; c = 'bash -s \<NL>python - <<''EOF''<NL>rm -rf ~/.claude-homes<NL>EOF'; want = 'deny' }
+        @{ n = 'a << inside an unquoted heredoc body'; c = 'cat <<X<NL>python - <<''EOF''<NL>X<NL>rm -rf ~/.claude-homes<NL>EOF'; want = 'deny' }
+        @{ n = 'a << after a marker the guard cannot read'; c = 'cat <<E"O"F<NL>python - <<''X''<NL>EOF<NL>rm -rf ~/.claude-homes<NL>X'; want = 'deny' }
+        @{ n = 'a heredoc marker in another case is not its end'; c = 'python - <<''EOF''<NL>x<NL>eof<NL>python - <<''X''<NL>EOF<NL>rm -rf ~/.claude-homes<NL>X'; want = 'deny' }
+        @{ n = 'python with a quoted -c reading the heredoc'; c = 'python ''-c'' ''import os,sys; os.system(sys.stdin.read())'' <<''EOF''<NL>rm -rf ~/.claude-homes<NL>EOF'; want = 'deny' }
+        # the pattern given by --, a long-option prefix, or a Select-String alias, prefix or colon
+        @{ n = 'grep -- -x, then a quoted denied file'; c = 'grep -- -x ''<TMP>/.claude-homes/./acme/CLAUDE.md'''; want = 'deny' }
+        @{ n = 'grep -- -x, then a quoted relative denied file'; c = 'grep -- -x ''.claude-homes/acme/CLAUDE.md'''; d = $tmp; want = 'deny' }
+        @{ n = 'grep --rege=x, then a quoted denied file'; c = 'grep --rege=x ''<TMP>/.claude-homes/./acme/CLAUDE.md'''; want = 'deny' }
+        @{ n = 'grep --fil=p, then a quoted denied file'; c = 'grep --fil=p ''<TMP>/.claude-homes/./acme/CLAUDE.md'''; want = 'deny' }
+        @{ n = 'grep --exclude-from a denied file'; c = 'grep --exclude-from ''<TMP>/.claude-homes/./acme/CLAUDE.md'' x README.md'; want = 'deny' }
+        @{ n = 'rg --ignore-file a denied file'; c = 'rg --ignore-file ''<TMP>/.claude-homes/./acme/CLAUDE.md'' x README.md'; want = 'deny' }
+        @{ n = 'rg --pre a denied script'; c = 'rg --pre ''<TMP>/.claude-homes/./acme/run.sh'' x README.md'; want = 'deny' }
+        @{ n = 'a $'''' pattern, then a quoted denied file'; c = 'grep $''\'''' ''<TMP>/.claude-homes/./acme/CLAUDE.md'''; want = 'deny' }
+        @{ n = 'Select-String -LP a denied file'; c = 'Select-String -LP ''<TMP>/.claude-homes/./acme/CLAUDE.md'' -Pattern x'; t = 'PowerShell'; want = 'deny' }
+        @{ n = 'Select-String -Lit a denied file'; c = 'Select-String -Lit ''<TMP>/.claude-homes/./acme/CLAUDE.md'' -Pattern x'; t = 'PowerShell'; want = 'deny' }
+        @{ n = 'Select-String -Pattern:x, then a denied file'; c = 'Select-String -Pattern:x ''<TMP>/.claude-homes/./acme/CLAUDE.md'''; t = 'PowerShell'; want = 'deny' }
+        @{ n = 'Select-String -Patt:x, then a denied file'; c = 'Select-String -Patt:x ''<TMP>/.claude-homes/./acme/CLAUDE.md'''; t = 'PowerShell'; want = 'deny' }
+        @{ n = 'Select-String -List, then a pattern and a denied file'; c = 'Select-String -List ''x'' ''<TMP>/.claude-homes/./acme/CLAUDE.md'''; t = 'PowerShell'; want = 'deny' }
+        @{ n = 'a PowerShell "x\" pattern, then -Path a denied file'; c = 'Select-String -Pattern "x\" -Path ''<TMP>/.claude-homes/./acme/CLAUDE.md'' -Encoding "utf8"'; t = 'PowerShell'; want = 'deny' }
+        # a backslash-newline joins lines
+        @{ n = 'cat, a backslash-newline, then a quoted relative denied file'; c = 'cat \<NL>grep ''.claude-homes/acme/CLAUDE.md'''; d = $tmp; want = 'deny' }
+        @{ n = 'cat, a backslash-newline, then a quoted denied file'; c = 'cat \<NL>grep ''<TMP>/.claude-homes/./acme/CLAUDE.md'''; want = 'deny' }
+        # an interpreter's heredoc script is not a recursive command; the shell's own commands still are
+        @{ n = 'a python -I - heredoc with script arguments, whose text reads as grep -r'; c = 'python -I - STATUS.md <<''EOF''<NL>s = ''board: grep tweaks, see ~ for -ScratchRoot''<NL>print(open(''..'').name, ''rg or find'')<NL>EOF<NL>sed -n 1,12p STATUS.md'; d = $ws; want = 'allow' }
+        @{ n = 'rg after a python heredoc, from above a denied root'; c = 'python - <<''EOF''<NL>x = 1<NL>EOF<NL>rg TODO'; d = $ws; want = 'deny' }
+        @{ n = 'rg in a heredoc fed to bash, from above a denied root'; c = 'bash <<''EOF''<NL>rg TODO<NL>EOF'; d = $ws; want = 'deny' }
+        @{ n = 'a python heredoc glob, from above a denied root'; c = 'python -I - x <<''EOF''<NL>import glob; glob.glob(''**'')<NL>EOF'; d = $ws; want = 'deny' }
+        # << in arithmetic is a shift, not a heredoc
+        @{ n = 'a << inside (( ))'; c = '((python<<''EOF''))<NL>rm -rf ~/.claude-homes<NL>EOF'; want = 'deny' }
+        @{ n = 'a << inside (( )), outside'; c = '((python - <<''EOF''))<NL>rm -rf <OUT><NL>EOF'; want = 'ask' }
+        @{ n = 'a << inside $[ ]'; c = 'echo $[1;python<<''EOF'' ]<NL>rm -rf ~/.claude-homes<NL>EOF'; want = 'deny' }
+        @{ n = 'rg after a << inside (( )), from above a denied root'; c = '((python<<''EOF''))<NL>rg TODO<NL>EOF'; d = $ws; want = 'deny' }
+        # a heredoc whose output reaches a shell after the body, through a group, subshell or extglob
+        @{ n = 'a python heredoc in ( ) piped into sh'; c = '(python - <<''EOF''<NL>print("rm -rf ~/.claude-homes")<NL>EOF<NL>) | sh'; want = 'deny' }
+        @{ n = 'a python heredoc in { } piped into sh'; c = '{ true; python - <<''EOF''<NL>print("rm -rf ~/.claude-homes")<NL>EOF<NL>} | sh'; want = 'deny' }
+        @{ n = 'a python heredoc in ( ) into >(sh)'; c = '(python - <<''EOF''<NL>print("rm -rf ~/.claude-homes")<NL>EOF<NL>) > >(sh)'; want = 'deny' }
+        @{ n = 'a python heredoc in a loop piped into sh'; c = 'for i in 1; do true; python - <<''EOF''<NL>print("rm -rf ~/.claude-homes")<NL>EOF<NL>done | sh'; want = 'deny' }
+        @{ n = 'a << inside an extglob'; c = 'echo @(x|python - <<''EOF'')<NL>print("rm -rf ~/.claude-homes")<NL>EOF'; want = 'deny' }
+        # the PowerShell tool has no heredoc
+        @{ n = 'PowerShell: a python heredoc body is judged'; c = 'python - <<''EOF''<NL>print("rm -rf ~/.claude-homes")<NL>EOF'; t = 'PowerShell'; want = 'deny' }
+        @{ n = 'PowerShell: "a\" then a fake heredoc hiding Remove-Item'; c = 'echo "a\"; echo "; python - <<''EOF''<NL>"; Remove-Item -Recurse -Force ~/.claude-homes<NL>EOF'; t = 'PowerShell'; want = 'deny' }
+        @{ n = 'PowerShell: "a\" then a fake heredoc hiding Remove-Item, outside'; c = 'echo "a\"; echo "; python - <<''EOF''<NL>"; Remove-Item -Recurse -Force <OUT><NL>EOF'; t = 'PowerShell'; want = 'ask' }
+        @{ n = 'PowerShell: "a\" then a fake heredoc hiding Get-ChildItem -Recurse'; c = 'echo "a\"; echo "; python - <<''EOF''<NL>"; Get-ChildItem -Recurse<NL>EOF'; t = 'PowerShell'; d = $ws; want = 'deny' }
+        # a pattern option anywhere in the statement leaves no positional pattern
+        @{ n = 'a quoted denied file, then grep -e'; c = 'grep ''<TMP>/.claude-homes/./acme/CLAUDE.md'' -e x'; want = 'deny' }
+        @{ n = 'a quoted relative denied file, then grep -e'; c = 'grep ''.claude-homes/acme/CLAUDE.md'' -e x'; d = $tmp; want = 'deny' }
+        @{ n = 'a quoted denied file, then grep --regexp='; c = 'grep ''<TMP>/.claude-homes/./acme/CLAUDE.md'' --regexp=x'; want = 'deny' }
+        @{ n = 'a quoted denied file, then grep -f'; c = 'grep ''<TMP>/.claude-homes/./acme/CLAUDE.md'' -f pats'; want = 'deny' }
+        @{ n = 'a quoted denied file, then grep -ve'; c = 'grep ''<TMP>/.claude-homes/./acme/CLAUDE.md'' -ve x'; want = 'deny' }
+        @{ n = 'a quoted denied file, then rg -e'; c = 'rg ''<TMP>/.claude-homes/./acme/CLAUDE.md'' -e x'; want = 'deny' }
+        @{ n = 'a quoted denied file, then sed -e'; c = 'sed ''<TMP>/.claude-homes/./acme/CLAUDE.md'' -e p'; want = 'deny' }
+        @{ n = 'grep -r from a holder, then -e'; c = 'grep -r ''<TMP>'' -e x'; want = 'deny' }
+        @{ n = 'Select-String a denied file, then -Pattern'; c = 'Select-String ''<TMP>/.claude-homes/./acme/CLAUDE.md'' -Pattern x'; t = 'PowerShell'; want = 'deny' }
+        @{ n = 'Select-String a denied file, then -pattern:x'; c = 'Select-String ''<TMP>/.claude-homes/./acme/CLAUDE.md'' -pattern:x'; t = 'PowerShell'; want = 'deny' }
+        @{ n = 'Select-String -PSPa a denied file'; c = 'Select-String -PSPa ''<TMP>/.claude-homes/./acme/CLAUDE.md'' -Pattern x'; t = 'PowerShell'; want = 'deny' }
+        @{ n = 'Select-String -LiteralPa a denied file'; c = 'Select-String -LiteralPa ''<TMP>/.claude-homes/./acme/CLAUDE.md'' -Pattern x'; t = 'PowerShell'; want = 'deny' }
+        # a redirection is not the pattern
+        @{ n = 'grep <''denied file'' x'; c = 'grep <''<TMP>/.claude-homes/./acme/CLAUDE.md'' x'; want = 'deny' }
+        @{ n = 'grep 0<''denied file'' x'; c = 'grep 0<''<TMP>/.claude-homes/./acme/CLAUDE.md'' x'; want = 'deny' }
+        @{ n = 'grep <''relative denied file'' x'; c = 'grep <''.claude-homes/acme/CLAUDE.md'' x'; d = $tmp; want = 'deny' }
+        @{ n = 'grep < ''denied file'' x'; c = 'grep < ''<TMP>/.claude-homes/./acme/CLAUDE.md'' x'; want = 'deny' }
+        @{ n = 'grep with a process substitution reading a denied file'; c = 'grep <(cat ''<TMP>/.claude-homes/./acme/CLAUDE.md'') x'; want = 'deny' }
+        # any pipe out of the heredoc's command can run what it prints
+        @{ n = 'a python heredoc piped into source /dev/stdin'; c = 'python - <<''EOF'' | source /dev/stdin<NL>print("rm -rf ~/.claude-homes")<NL>EOF'; want = 'deny' }
+        @{ n = 'a python heredoc piped into . /dev/stdin'; c = 'python - <<''EOF'' | . /dev/stdin<NL>print("rm -rf ~/.claude-homes")<NL>EOF'; want = 'deny' }
+        @{ n = 'a python heredoc piped into (sh)'; c = 'python - <<''EOF'' | (sh)<NL>print("rm -rf ~/.claude-homes")<NL>EOF'; want = 'deny' }
+        @{ n = 'a python heredoc piped into a read loop'; c = 'python - <<''EOF'' | while read l; do $l; done<NL>print("rm -rf ~/.claude-homes")<NL>EOF'; want = 'deny' }
+        # a tool the guard doesn't know gets neither exemption
+        @{ n = 'an unknown tool: a python heredoc body is judged'; c = 'python - <<''EOF''<NL>print("rm -rf ~/.claude-homes")<NL>EOF'; t = 'Other'; want = 'deny' }
+        @{ n = 'an unknown tool: a quoted grep pattern is checked'; c = 'grep -n ''/[Hh]ome'' README.md'; t = 'Other'; want = 'deny' }
+        # rg --files and --type-list take no pattern, so a quoted word is a path
+        @{ n = 'rg --files of a quoted relative denied folder'; c = 'rg --files ''../.claude-homes/acme'''; d = $ws; want = 'deny' }
+        @{ n = 'rg --files of a double-quoted relative denied folder'; c = 'rg --files ".claude-homes/acme"'; d = $tmp; want = 'deny' }
+        @{ n = 'rg --files -g of a quoted relative denied folder'; c = 'rg --files -g ''*.md'' ''.claude-homes/acme'''; d = $tmp; want = 'deny' }
+        @{ n = 'rg --files of a quoted absolute denied folder'; c = 'rg --files ''<TMP>/.claude-homes/./acme'''; want = 'deny' }
+        @{ n = 'rg --files of a quoted holder'; c = 'rg --files ''<TMP>'''; want = 'deny' }
+        @{ n = 'rg --type-list, then a quoted denied folder'; c = 'rg --type-list ''<TMP>/.claude-homes/./acme'''; want = 'deny' }
+        # pattern masking skips commands with a heredoc
+        @{ n = 'a python heredoc line that starts with grep'; c = 'python - <<''EOF''<NL>grep = open; grep (''<TMP>/.claude-homes/./acme/CLAUDE.md'').read()<NL>EOF'; want = 'deny' }
+    )
+    foreach ($c in $textCases) {
+        $c.c = $c.c.Replace('<NL>', "`n").Replace('<OUT>', $outPosix).Replace('<TMP>', $tmpPosix)
+        $r = Shell $c.c ($c.d ?? $hubDir) '' $ws ($c.t ?? 'Bash')
+        $got = if ($r.Out -match '"permissionDecision":"deny"') { 'deny' } elseif ($r.Out -match '"permissionDecision":"ask"') { 'ask' } elseif ($r.Out -eq '') { 'allow' } else { 'other' }
+        Check "shell guard text: $($c.n) is $($c.want)" ($r.Code -eq 0 -and $got -eq $c.want) "$($c.c) -> $($r.Out) $($r.Err)"
     }
     $r = Shell 'rm -rf build' $hubDir '' ''
     Check 'shell guard delete: without a workspace root, a delete asks' ($r.Out -match '"permissionDecision":"ask"') $r.Out
